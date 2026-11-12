@@ -14,7 +14,8 @@
 // Usage: recorder <windowID> <durationSeconds> <outputPath>
 //
 // Env:
-//   RECORDER_BG=<preset>     — background preset (default: indigo)
+//   RECORDER_BG_IMAGE=<path> — background image, scale-to-fill + centre crop;
+//                              unset, empty or undecodable → mesh gradient
 //   RECORDER_NO_AUDIO=1      — skip mic capture
 //   RECORDER_SOLID_RED=1     — probe mode: solid red bg, no shadow/padding,
 //                              used to verify alpha-through-compose end-to-end

@@ -10,6 +10,7 @@
 
 import AVFoundation
 import AppKit
+import UniformTypeIdentifiers
 
 struct LaunchOptions {
     var debugShow: String?
@@ -172,6 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         installStatusItem()
+        Backgrounds.shared.warmThumbnails()
         startControlServer(session: session)
         note("ready — ⌥⌘R to record")
 
@@ -242,7 +244,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return .agent(label: request.string("label") ?? "Claude")
             }()
             let output = request.string("output").map { URL(fileURLWithPath: $0) }
-            session.start(window: window, source: source, output: output) { reply($0) }
+            var background: Background?
+            if let asked = request.string("background") {
+                guard let found = Backgrounds.shared.resolve(asked) else {
+                    return respond(["ok": false, "error": "background_not_found",
+                                    "message": "no saved background or image file matches \"\(asked)\""])
+                }
+                background = found
+            }
+            session.start(window: window, source: source, output: output, background: background) { reply($0) }
+
+        case "backgrounds":
+            respond(Backgrounds.shared.payload())
 
         case "stop":
             session.requestStop { reply($0) }
@@ -316,6 +329,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+        menu.addItem(backgroundMenuItem())
+
+        menu.addItem(.separator())
 
         // A section of its own, NOT grouped with Quit. macOS gives Quit a
         // system-supplied glyph, and an icon on any item makes AppKit reserve an icon
@@ -342,6 +358,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(
             NSMenuItem(title: "Quit Windowclip", action: #selector(NSApp.terminate(_:)), keyEquivalent: "q")
         )
+    }
+
+    /// Rebuilt with the rest of the menu on every open, so a file dropped into
+    /// the folder in Finder is there the next time the menu opens. Groups are
+    /// the folder's subfolders, each under its own header.
+    private func backgroundMenuItem() -> NSMenuItem {
+        let store = Backgrounds.shared
+        let current = store.current
+        let parent = NSMenuItem(
+            title: "Background: \(current?.name ?? "None")", action: nil, keyEquivalent: ""
+        )
+        parent.isEnabled = true
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+
+        if let fallback = store.bundledDefault {
+            submenu.addItem(backgroundItem(fallback, title: "\(fallback.name) (default)", current: current))
+        }
+        var group: String?
+        for item in store.saved() {
+            if item.group != group {
+                group = item.group
+                submenu.addItem(.separator())
+                submenu.addItem(.sectionHeader(title: item.group ?? ""))
+            }
+            submenu.addItem(backgroundItem(item, title: item.name, current: current))
+        }
+
+        submenu.addItem(.separator())
+        let add = NSMenuItem(title: "Add Background…", action: #selector(addBackground), keyEquivalent: "")
+        add.target = self
+        add.isEnabled = true
+        submenu.addItem(add)
+        let reveal = NSMenuItem(
+            title: "Show Backgrounds Folder", action: #selector(showBackgroundsFolder), keyEquivalent: ""
+        )
+        reveal.target = self
+        reveal.isEnabled = true
+        submenu.addItem(reveal)
+
+        parent.submenu = submenu
+        return parent
+    }
+
+    private func backgroundItem(_ background: Background, title: String, current: Background?) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: #selector(chooseBackground(_:)), keyEquivalent: "")
+        item.target = self
+        item.isEnabled = true
+        item.representedObject = background.id
+        item.state = background.id == current?.id ? .on : .off
+        item.image = Backgrounds.shared.thumbnail(for: background)
+        item.toolTip = background.url.path
+        return item
+    }
+
+    @objc private func chooseBackground(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let chosen = Backgrounds.shared.resolve(id)
+        else { return }
+        Backgrounds.shared.select(chosen)
+    }
+
+    @objc private func addBackground() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.prompt = "Add"
+        panel.message = "Choose images to keep as backgrounds. They are copied into the backgrounds folder."
+        NSApp.activate()
+        guard panel.runModal() == .OK else { return }
+        let added = Backgrounds.shared.importFiles(panel.urls)
+        if added.count == 1 { Backgrounds.shared.select(added[0]) }
+        Backgrounds.shared.warmThumbnails()
+    }
+
+    @objc private func showBackgroundsFolder() {
+        let folder = Backgrounds.shared.folder
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(folder)
     }
 
     /// Summoned on demand, so the window is reachable when everything is already
@@ -530,17 +626,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let menu = statusItem?.menu {
             rebuildMenu(menu)
             note("menu items:")
-            for item in menu.items {
-                if item.isSeparatorItem { note("  ---"); continue }
-                // indent/image/state are reported because they are what decides an
-                // item's left inset, and a row sitting at a different inset from its
-                // neighbours reads as a layout accident rather than a group.
-                note("  \(item.isEnabled ? "•" : "×") \(item.title)"
-                    + " [indent=\(item.indentationLevel)"
-                    + " image=\(item.image == nil ? "none" : "yes")"
-                    + " state=\(item.state.rawValue)"
-                    + " key=\(item.keyEquivalent.isEmpty ? "-" : item.keyEquivalent)]")
-            }
+            Self.dump(menu, depth: 1)
         }
         armMenuCapture()
         DispatchQueue.main.async { [self] in
@@ -603,6 +689,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         reportCapture(path, describedAs: "window \(id)")
     }
 
+    // indent/image/state are reported because they are what decides an item's
+    // left inset, and a row sitting at a different inset from its neighbours
+    // reads as a layout accident rather than a group.
+    private static func dump(_ menu: NSMenu, depth: Int) {
+        let pad = String(repeating: "  ", count: depth)
+        for item in menu.items {
+            if item.isSeparatorItem { note("\(pad)---"); continue }
+            note("\(pad)\(item.isEnabled ? "•" : "×") \(item.title)"
+                + " [indent=\(item.indentationLevel)"
+                + " image=\(item.image.map { "\(Int($0.size.width))x\(Int($0.size.height))" } ?? "none")"
+                + " state=\(item.state.rawValue)"
+                + " header=\(item.isSectionHeader)"
+                + " key=\(item.keyEquivalent.isEmpty ? "-" : item.keyEquivalent)]")
+            if let submenu = item.submenu { dump(submenu, depth: depth + 1) }
+        }
+    }
+
+    /// Submenu items first, so a needle like "1B" reaches a background rather
+    /// than the parent whose title names the current one.
+    private static func flatten(_ menu: NSMenu) -> [NSMenuItem] {
+        menu.items.flatMap { item in (item.submenu.map(flatten) ?? []) + [item] }
+    }
+
     /// Fire the status-menu item whose title contains `needle` — the real NSMenuItem,
     /// its real target and action. A menu entry is only worth as much as what happens
     /// when it is clicked, and clicking one for real needs an Accessibility grant this
@@ -611,10 +720,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         installStatusItem()
         guard let menu = statusItem?.menu else { exit(70) }
         rebuildMenu(menu)
-        guard let item = menu.items.first(where: {
+        guard let item = Self.flatten(menu).first(where: {
             $0.title.localizedCaseInsensitiveContains(needle)
         }) else {
-            let titles = menu.items.map(\.title).filter { !$0.isEmpty }
+            let titles = Self.flatten(menu).map(\.title).filter { !$0.isEmpty }
             FileHandle.standardError.write(Data(
                 "windowclip: no menu item matching \"\(needle)\" among \(titles)\n".utf8
             ))

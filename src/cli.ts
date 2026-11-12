@@ -8,7 +8,7 @@
 //   - no display picker; uses whatever `Capture screen 0` is today
 
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { resolve, dirname, basename } from "node:path";
@@ -35,10 +35,8 @@ const FPS = 30;
 // ---------------------------------------------------------------------------
 
 const APP_PATH = "/Applications/Windowclip.app";
-const CONTROL_SOCKET = resolve(
-  homedir(),
-  "Library/Application Support/Windowclip/control.sock",
-);
+const APP_SUPPORT = resolve(homedir(), "Library/Application Support/Windowclip");
+const CONTROL_SOCKET = resolve(APP_SUPPORT, "control.sock");
 
 type ControlResponse = {
   ok: boolean;
@@ -111,6 +109,91 @@ async function ensureApp(): Promise<void> {
   throw new Error("Windowclip did not come up within 15s");
 }
 
+// ---------------------------------------------------------------------------
+// Saved backgrounds (DIG-2643). The app owns the menu and the choice; this is
+// the same folder and file read from disk, so --headless and `backgrounds`
+// work with the app down. Twin of app/Sources/Backgrounds.swift.
+// ---------------------------------------------------------------------------
+
+const BACKGROUNDS_DIR = resolve(APP_SUPPORT, "Backgrounds");
+const BACKGROUND_CHOICE = resolve(APP_SUPPORT, "background.json");
+const DEFAULT_BACKGROUND = resolve(REPO_ROOT, "assets/big-sur-graphic.jpg");
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "heic", "heif", "tif", "tiff", "webp"]);
+
+type SavedBackground = { id: string; name: string; group?: string; path: string };
+
+const byName = (a: { name: string }, b: { name: string }) =>
+  a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+
+function imageEntry(dir: string, file: string, group?: string): SavedBackground | null {
+  const dot = file.lastIndexOf(".");
+  if (dot <= 0 || !IMAGE_EXTENSIONS.has(file.slice(dot + 1).toLowerCase())) return null;
+  return { id: group ? `${group}/${file}` : file, name: file.slice(0, dot), group, path: resolve(dir, file) };
+}
+
+function savedBackgrounds(): SavedBackground[] {
+  if (!existsSync(BACKGROUNDS_DIR)) return [];
+  const loose: SavedBackground[] = [];
+  const groups: { name: string; items: SavedBackground[] }[] = [];
+  for (const entry of readdirSync(BACKGROUNDS_DIR)) {
+    if (entry.startsWith(".")) continue;
+    const full = resolve(BACKGROUNDS_DIR, entry);
+    if (statSync(full).isDirectory()) {
+      const items = readdirSync(full)
+        .filter((f) => !f.startsWith("."))
+        .map((f) => imageEntry(full, f, entry))
+        .filter((b): b is SavedBackground => b !== null && statSync(b.path).isFile());
+      groups.push({ name: entry, items: items.sort(byName) });
+    } else {
+      const item = imageEntry(BACKGROUNDS_DIR, entry);
+      if (item) loose.push(item);
+    }
+  }
+  return [...loose.sort(byName), ...groups.sort(byName).flatMap((g) => g.items)];
+}
+
+/** The choice made in the app's menu, if it still points at a file. */
+function chosenBackground(): SavedBackground | null {
+  if (!existsSync(BACKGROUND_CHOICE)) return null;
+  try {
+    const { selected } = JSON.parse(readFileSync(BACKGROUND_CHOICE, "utf8")) as { selected?: string };
+    return savedBackgrounds().find((b) => b.id === selected) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Same order as the app: `default`, a saved id, a saved name, then a path to an image. */
+function resolveBackground(request: string): string | null {
+  if (request === "default") return existsSync(DEFAULT_BACKGROUND) ? DEFAULT_BACKGROUND : "";
+  const saved = savedBackgrounds();
+  const lower = request.toLowerCase();
+  const match =
+    saved.find((b) => b.id === request) ??
+    saved.find((b) => b.name.toLowerCase() === lower || basename(b.path).toLowerCase() === lower);
+  if (match) return match.path;
+  const path = resolve(request.replace(/^~(?=\/)/, homedir()));
+  const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  return IMAGE_EXTENSIONS.has(ext) && existsSync(path) && statSync(path).isFile() ? path : null;
+}
+
+function printBackgrounds() {
+  const current = chosenBackground();
+  const items = [
+    { id: "default", name: "Big Sur", path: DEFAULT_BACKGROUND },
+    ...savedBackgrounds(),
+  ].map((b) => ({ ...b, current: b.id === (current?.id ?? "default") }));
+  console.log(JSON.stringify({ current: current?.id ?? "default", folder: BACKGROUNDS_DIR, items }, null, 2));
+}
+
+function unknownBackground(request: string): never {
+  console.error(
+    `[windowclip] no saved background or image file matches "${request}". ` +
+      `\`windowclip backgrounds\` lists the saved ones.`,
+  );
+  process.exit(1);
+}
+
 // Exponential smoothing time constant for cursor → camera. Camera position lags
 // cursor with a ~tau half-life; smaller tau = snappier follow, larger = floatier.
 // 0.18s feels close to Screen Studio's default.
@@ -150,6 +233,10 @@ type Args = {
   source: "agent" | "human";
   /** Control subcommand, if the invocation was one. */
   controlCommand?: "stop" | "cancel" | "status";
+  /** `windowclip backgrounds`: list the saved backgrounds and exit. */
+  listBackgrounds: boolean;
+  /** This recording only: a saved background's name or id, `default`, or an image path. */
+  background?: string;
 };
 
 function parseArgs(argv: string[]): Args {
@@ -162,6 +249,7 @@ function parseArgs(argv: string[]): Args {
     headless: false,
     label: "Claude",
     source: "agent",
+    listBackgrounds: false,
   };
   // Control subcommands: `windowclip stop|cancel|status`.
   if (argv[0] === "stop" || argv[0] === "cancel" || argv[0] === "status") {
@@ -175,6 +263,10 @@ function parseArgs(argv: string[]): Args {
     args.listWindows = true;
     return args;
   }
+  if (argv[0] === "backgrounds") {
+    args.listBackgrounds = true;
+    return args;
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--duration" || a === "-t") args.duration = Number(argv[++i]);
@@ -186,6 +278,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--headless") args.headless = true;
     else if (a === "--label") args.label = argv[++i];
     else if (a === "--source") args.source = argv[++i] === "human" ? "human" : "agent";
+    else if (a === "--background" || a === "-b") args.background = argv[++i];
     else if (a === "-h" || a === "--help") {
       console.log(`windowclip — record a window + render polished MP4
 
@@ -198,6 +291,8 @@ Usage:
   windowclip cancel                 abort and delete the partial file
   windowclip status                 print what the app is doing, as JSON
   windowclip list-windows           print on-screen windows as JSON and exit
+  windowclip backgrounds            print the saved backgrounds and which one
+                                    recordings use, as JSON
 
 Recording options:
   -t, --duration <s>    recording duration in seconds, or 0 for open-ended
@@ -212,6 +307,9 @@ Recording options:
                         you have an exact id from \`windowclip list-windows\`.
       --label <name>    who the pill credits for the recording (default Claude)
       --source <who>    agent (default) or human — picks the pill's treatment
+  -b, --background <b>  this recording only: a saved background's name or id
+                        (see \`windowclip backgrounds\`), \`default\`, or an
+                        image path. Without it, the one chosen in the app's menu.
       --headless        bypass the app: spawn the recorder directly, no pill.
                         Only for contexts with no GUI session.
   -h, --help            this help
@@ -380,7 +478,7 @@ export function commitClicks(clicks: Click[], cursor: CursorSample[]): Click[] {
   });
 }
 
-async function record(args: Args, windowID: number, outputPath: string, workDir: string) {
+async function record(args: Args, windowID: number, outputPath: string, workDir: string, background: string) {
   // v3: recorder owns the whole pipeline — captures, composites onto a styled
   // background via Core Image, and outputs the final H.264 MP4 directly. No
   // post-recording stage needed.
@@ -408,10 +506,6 @@ async function record(args: Args, windowID: number, outputPath: string, workDir:
   // compose + encode all happen inside one Swift process using SCK + Core
   // Image + AVAssetWriter. No intermediate file, no Remotion pass.
   //
-  // Default background: the Big Sur Color Day wallpaper, downloaded once and
-  // checked into the repo at assets/. The recorder loads it at init and
-  // scale-to-fills the 1920x1080 canvas. Override via RECORDER_BG_IMAGE.
-  const defaultBg = resolve(REPO_ROOT, "assets/big-sur-graphic.jpg");
   const recorderProc = spawn(
     RECORDER_BIN,
     [String(windowID), String(args.duration), outputPath],
@@ -419,7 +513,7 @@ async function record(args: Args, windowID: number, outputPath: string, workDir:
       stdio: ["ignore", "inherit", "inherit"],
       env: {
         ...process.env,
-        RECORDER_BG_IMAGE: process.env.RECORDER_BG_IMAGE ?? (existsSync(defaultBg) ? defaultBg : ""),
+        RECORDER_BG_IMAGE: background,
       },
     },
   );
@@ -459,12 +553,17 @@ async function recordViaApp(args: Args) {
   await ensureApp();
 
   const windowId = args.windowId ?? (await detectWindow({ pattern: args.window })).windowId;
+  // A path is made absolute here, since the app doesn't share our cwd; a name
+  // goes as-is and the app resolves it against its saved set.
+  const background =
+    args.background && existsSync(args.background) ? resolve(args.background) : args.background;
   const started = await control({
     command: "start",
     windowId,
     output: resolve(args.output),
     source: args.source,
     label: args.label,
+    ...(background ? { background } : {}),
   });
 
   if (!started.ok) {
@@ -476,6 +575,7 @@ async function recordViaApp(args: Args) {
       );
       process.exit(3);
     }
+    if (started.error === "background_not_found") unknownBackground(args.background ?? "");
     if (started.cancelled) {
       console.error(`[windowclip] cancelled during the countdown — nothing recorded.`);
       process.exit(4);
@@ -552,6 +652,11 @@ async function main() {
     return;
   }
 
+  if (args.listBackgrounds) {
+    printBackgrounds();
+    return;
+  }
+
   if (args.listWindows) {
     // Thin pass-through to the windows binary. Inherits stdio so callers get
     // the raw JSON array on stdout and any errors on stderr.
@@ -597,7 +702,17 @@ async function main() {
     process.exit(1);
   }
 
-  const { clicksPath, t0Epoch } = await record(args, windowInfo.windowId, outputPath, workDir);
+  // --background, then RECORDER_BG_IMAGE, then the app's saved choice, then the
+  // Big Sur default in assets/. Settled before anything is spawned, so a bad
+  // name exits with nothing left running.
+  const background = args.background
+    ? (resolveBackground(args.background) ?? unknownBackground(args.background))
+    : (process.env.RECORDER_BG_IMAGE ??
+      chosenBackground()?.path ??
+      (existsSync(DEFAULT_BACKGROUND) ? DEFAULT_BACKGROUND : ""));
+  console.error(`[windowclip] background: ${background || "(mesh gradient)"}`);
+
+  const { clicksPath, t0Epoch } = await record(args, windowInfo.windowId, outputPath, workDir, background);
   writeFileSync(resolve(workDir, "meta.json"), JSON.stringify({ t0Epoch, windowInfo }, null, 2));
 
   // Load click/cursor data for diagnostics (and future overlay features).

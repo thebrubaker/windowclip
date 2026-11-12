@@ -45,9 +45,7 @@ final class RecentRecordings {
     /// first run that opens with someone else's recents is the wrong first run.
     /// The stale directory is harmless; delete it by hand if it bothers you.
     nonisolated static var defaultStoreURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Windowclip", isDirectory: true)
-        return base.appendingPathComponent("recents.json")
+        AppSupport.directory.appendingPathComponent("recents.json")
     }
 
     /// Called when a recording has actually been written. Cancelled sessions
