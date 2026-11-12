@@ -187,7 +187,9 @@ app-routed path exists to stop worrying about.
 
 - **Editing.** The recording is the deliverable. Don't propose trims or transitions.
 - **Multiple windows.** One window at a time.
-- **Background customization.** One warm default. Don't ask Joel to pick.
+- **Choosing the background.** Joel picks it in the app's menu (Background ▸), and every
+  recording uses it. Don't ask him to pick. When he names a different one for a single
+  recording, pass `--background <name>`; `windowclip backgrounds` lists the names.
 
 ## File reference
 

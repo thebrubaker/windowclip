@@ -74,7 +74,7 @@ final class Recorder {
 
     /// Same default background the CLI uses, so both front doors produce clips
     /// that look like they came from the same tool.
-    static var backgroundImageURL: URL? {
+    static var defaultBackgroundURL: URL? {
         let fm = FileManager.default
         if let bundled = Bundle.main.url(forResource: "big-sur-graphic", withExtension: "jpg"),
            fm.fileExists(atPath: bundled.path) {
@@ -101,7 +101,7 @@ final class Recorder {
     /// session behind DIG-807). Spawning here — during the countdown — means
     /// that cost is paid inside a wait the user is already having, and `go()`
     /// can begin capture on a pipeline that is already hot.
-    func prepare(windowID: CGWindowID, output: URL) throws {
+    func prepare(windowID: CGWindowID, output: URL, background: URL?) throws {
         let binary = Self.binaryURL
         guard FileManager.default.isExecutableFile(atPath: binary.path) else {
             throw StartError.binaryMissing(binary.path)
@@ -113,7 +113,7 @@ final class Recorder {
         task.arguments = [String(windowID), "0", output.path]
 
         var env = ProcessInfo.processInfo.environment
-        env["RECORDER_BG_IMAGE"] = Self.backgroundImageURL?.path ?? ""
+        env["RECORDER_BG_IMAGE"] = background?.path ?? ""
         // Hold the take until SIGUSR1, and report lifecycle on stdout.
         env["RECORDER_HANDSHAKE"] = "1"
         task.environment = env

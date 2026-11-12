@@ -28,7 +28,7 @@ Output:
 
 - 1920×1080 H.264 MP4 with mic audio
 - Only your target window — overlapping windows, notifications, the dock, the menubar all stay out
-- The window has its native rounded corners, with a soft drop shadow and the Big Sur Color Day wallpaper as the background
+- The window has its native rounded corners, with a soft drop shadow, on the background you picked in the menu (the Big Sur Color Day wallpaper until you pick another)
 
 Or use it as a plain CLI without Claude — see below.
 
@@ -396,15 +396,20 @@ echo '{"command":"escape"}' | nc -U "$SOCK"
 
 ## Changing the background
 
-Default is the Big Sur Color Day wallpaper shipped in `assets/big-sur-graphic.jpg`. Override with any JPEG/PNG/HEIC:
+Pick one from the menu bar menu: **Background ▸**. Every recording after that uses it, whether it was started from the hotkey, the menu, the CLI or an agent, until you pick another. The default is the Big Sur Color Day wallpaper shipped in `assets/big-sur-graphic.jpg`.
+
+Your saved backgrounds are image files in `~/Library/Application Support/Windowclip/Backgrounds/`. Add one with **Background ▸ Add Background…** (it copies the file in), or drop files into the folder from Finder (**Show Backgrounds Folder**). Each subfolder becomes a titled group in the menu, which keeps a long list scannable, for example one folder per brand. Delete a file in Finder to remove it.
+
+For a single recording, without changing the saved choice:
 
 ```bash
-RECORDER_BG_IMAGE=/path/to/your-wallpaper.png bun run cli ...
+bun run cli --background 1B-eclipse-over-dunes ...   # a saved name, an id, `default`, or an image path
+bun run cli backgrounds                              # what's saved, and which one is current, as JSON
 ```
 
-The image is scale-to-filled and center-cropped to 1920×1080. Square wallpapers (like Apple's 6016×6016 originals) work great.
+The image is scale-to-filled and center-cropped to 1920×1080, so a 16:10 wallpaper loses a strip off its top and bottom. Any JPEG, PNG, HEIC or TIFF works.
 
-If you want a procedural background instead of an image, set `RECORDER_BG_IMAGE=""` and the recorder falls back to a SwiftUI `MeshGradient` with a warm peach→mocha palette.
+`--headless` follows the same order: `--background`, then `RECORDER_BG_IMAGE`, then the menu choice, then the default. `RECORDER_BG_IMAGE` only applies to `--headless`. Set it to `""` there for the recorder's SwiftUI `MeshGradient` fallback (warm peach→mocha).
 
 ---
 

@@ -40,9 +40,7 @@ final class ControlServer {
     private var acceptSource: DispatchSourceRead?
 
     static var socketURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Windowclip", isDirectory: true)
-        return base.appendingPathComponent("control.sock")
+        AppSupport.directory.appendingPathComponent("control.sock")
     }
 
     func start() throws {

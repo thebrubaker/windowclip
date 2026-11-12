@@ -94,6 +94,8 @@ final class SessionController {
     /// Who started the live session, and where they asked for the file.
     private(set) var source: SessionSource = .human
     private var requestedOutput: URL?
+    private var requestedBackground: Background?
+    private var activeBackground: Background?
 
     /// Control-surface callers block on these. A `start` isn't answered until the
     /// countdown has actually elapsed, so the caller learns "recording" or
@@ -159,6 +161,7 @@ final class SessionController {
         window: CapturableWindow,
         source: SessionSource = .human,
         output: URL? = nil,
+        background: Background? = nil,
         completion: ((SessionResult) -> Void)? = nil
     ) {
         guard phase == .idle else {
@@ -173,6 +176,7 @@ final class SessionController {
         }
         self.source = source
         self.requestedOutput = output
+        self.requestedBackground = background
         self.startWaiter = completion
         beginCountdown(for: window)
     }
@@ -220,6 +224,10 @@ final class SessionController {
         if let label = source.label { payload["label"] = label }
         if let target { payload["windowId"] = Int(target.id); payload["app"] = target.app }
         if let output = recorder.outputURL { payload["output"] = output.path }
+        let live = phase == .countdown || phase == .recording
+        if let background = (live ? activeBackground : nil) ?? Backgrounds.shared.current {
+            payload["background"] = background.id
+        }
         if phase == .recording { payload["elapsed"] = recorder.elapsed }
         return payload
     }
@@ -288,7 +296,9 @@ final class SessionController {
             try FileManager.default.createDirectory(
                 at: output.deletingLastPathComponent(), withIntermediateDirectories: true
             )
-            try recorder.prepare(windowID: window.id, output: output)
+            let background = requestedBackground ?? Backgrounds.shared.current
+            activeBackground = background
+            try recorder.prepare(windowID: window.id, output: output, background: background?.url)
         } catch {
             note("failed to start recorder: \(error.localizedDescription)")
             NSSound.beep()
@@ -472,6 +482,8 @@ final class SessionController {
         target = nil
         preparedOutput = nil
         requestedOutput = nil
+        requestedBackground = nil
+        activeBackground = nil
         source = .human
         phase = .idle
         // Whoever asked for this session learns the user ended it. This is how a
