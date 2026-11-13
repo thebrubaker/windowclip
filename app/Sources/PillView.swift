@@ -26,6 +26,7 @@ struct PillView: View {
     /// not-user-initiated at a glance — that visibility is the precondition for
     /// ever letting an agent start one.
     var source: SessionSource = .human
+    var showsEscapeHint = true
     /// Debug instrument: draws the row's true vertical midline over the pill so
     /// optical centering can be *measured* in a screenshot instead of eyeballed.
     var showMidline: Bool = false
@@ -61,7 +62,9 @@ struct PillView: View {
                 )
                 .font(Theme.labelFont)
                 .opticallyCentered(Theme.labelNSFont)
-                HintRow(leading: nil, key: "esc", trailing: "cancel")
+                if showsEscapeHint {
+                    HintRow(leading: nil, key: "esc", trailing: "cancel")
+                }
 
             case let .recording(elapsed):
                 RecordingDot(freeze: freezeAnimation)
@@ -79,7 +82,9 @@ struct PillView: View {
                     .frame(width: 1, height: 14)
                     .pillRowItem()
                 StopButton(action: onStop)
-                HintRow(leading: "or", key: "esc", trailing: nil)
+                if showsEscapeHint {
+                    HintRow(leading: "or", key: "esc", trailing: nil)
+                }
 
             case let .saved(url, duration):
                 SavedCheck()

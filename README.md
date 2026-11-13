@@ -224,6 +224,8 @@ H.264 encoder refuses 5K). Windowclip's own windows are left out of the capture,
 so the pill stays on your screen to stop with but never appears in the file. The
 menu bar is drawn by the system, so Windowclip's menu bar icon and macOS's
 recording indicator do appear.
+`esc` is left alone during a screen recording, so the app you're demoing keeps
+it: stop with the pill's **Stop** or `⌥⌘R`, which also cancels the countdown.
 
 **On `esc`:** it's a global hotkey, so it's grabbed from every other app while
 it's registered — which is why it's registered *only* for the seconds a pill is
