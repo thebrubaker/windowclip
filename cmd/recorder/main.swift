@@ -1,6 +1,7 @@
 // windowclip recorder — captures a single macOS window with ScreenCaptureKit,
 // composites it onto a styled background via Core Image, and writes a finished
-// H.264 MP4 with optional mic audio.
+// H.264 MP4 with optional mic audio. Or captures one whole display as-is: no
+// background, padding or shadow, at the display's own aspect ratio.
 //
 // Why this owns the whole pipeline (capture → compose → encode): Remotion's
 // alpha pipeline drops source transparency when re-encoding to H264, which
@@ -11,12 +12,16 @@
 //
 // Output: MP4 (H.264 video + AAC audio).
 //
-// Usage: recorder <windowID> <durationSeconds> <outputPath>
+// Usage: recorder <target> <durationSeconds> <outputPath>
+//   <target> is a CGWindowID, or display:<CGDirectDisplayID>, or display:main
 //
 // Env:
 //   RECORDER_BG_IMAGE=<path> — background image, scale-to-fill + centre crop;
 //                              unset, empty or undecodable → mesh gradient
 //   RECORDER_NO_AUDIO=1      — skip mic capture
+//   RECORDER_EXCLUDE_PID=<n> — display capture leaves this process's windows
+//                              out of the frames (the app passes its own pid,
+//                              so its pill never appears in a screen recording)
 //   RECORDER_SOLID_RED=1     — probe mode: solid red bg, no shadow/padding,
 //                              used to verify alpha-through-compose end-to-end
 //   SIGUSR2                  — discard: stop and delete the take instead of
@@ -53,11 +58,28 @@ import SwiftUI
 
 // MARK: - Args
 
+enum CaptureTarget {
+    case window(CGWindowID)
+    case display(CGDirectDisplayID)
+
+    init?(argument: String) {
+        if argument == "display:main" {
+            self = .display(CGMainDisplayID())
+        } else if argument.hasPrefix("display:"), let id = UInt32(argument.dropFirst("display:".count)) {
+            self = .display(CGDirectDisplayID(id))
+        } else if let id = UInt32(argument) {
+            self = .window(CGWindowID(id))
+        } else {
+            return nil
+        }
+    }
+}
+
 let args = CommandLine.arguments
 guard args.count >= 4,
-      let windowIDNum = UInt32(args[1]),
+      let captureTarget = CaptureTarget(argument: args[1]),
       let durationS = Double(args[2]) else {
-    FileHandle.standardError.write(Data("usage: recorder <windowID> <durationSeconds> <outputPath>\n".utf8))
+    FileHandle.standardError.write(Data("usage: recorder <windowID | display:<id> | display:main> <durationSeconds> <outputPath>\n".utf8))
     exit(64)
 }
 let outputPath = args[3]
@@ -73,7 +95,7 @@ func removePartial() {
         try? FileManager.default.removeItem(at: partialURL)
     }
 }
-let windowID = CGWindowID(windowIDNum)
+let excludedPID = ProcessInfo.processInfo.environment["RECORDER_EXCLUDE_PID"].flatMap { pid_t($0) }
 let captureAudio = ProcessInfo.processInfo.environment["RECORDER_NO_AUDIO"] != "1"
 let probeSolidRed = ProcessInfo.processInfo.environment["RECORDER_SOLID_RED"] == "1"
 /// Controller mode: hold the take until SIGUSR1, and report lifecycle on stdout.
@@ -87,6 +109,22 @@ let backgroundImagePath = ProcessInfo.processInfo.environment["RECORDER_BG_IMAGE
 // 1920x1080 final output. Hardcoded for now — backgrounds and presets land later.
 let OUTPUT_W = 1920
 let OUTPUT_H = 1080
+let WINDOW_BITRATE = 12_000_000
+
+let DISPLAY_MAX_W = 3840
+let DISPLAY_MAX_H = 2160
+let DISPLAY_MAX_BITRATE = 40_000_000
+
+func displayOutputSize(pixelWidth: Int, pixelHeight: Int) -> (width: Int, height: Int) {
+    let fit = min(1.0, Double(DISPLAY_MAX_W) / Double(pixelWidth), Double(DISPLAY_MAX_H) / Double(pixelHeight))
+    func even(_ v: Double) -> Int { max(2, Int(v / 2) * 2) }
+    return (even(Double(pixelWidth) * fit), even(Double(pixelHeight) * fit))
+}
+
+func displayBitrate(width: Int, height: Int) -> Int {
+    let perPixel = Double(WINDOW_BITRATE) / Double(OUTPUT_W * OUTPUT_H)
+    return min(DISPLAY_MAX_BITRATE, Int(perPixel * Double(width * height)))
+}
 
 /// When `durationS == 0` we run open-ended until SIGTERM/SIGINT. This safety
 /// cap stops a forgotten recording from filling the disk if the user walks
@@ -282,11 +320,17 @@ func fitTransform(srcW: Int, srcH: Int, outputW: Int, outputH: Int, padRatio: CG
 /// Composites a window-shaped CIImage (with alpha) onto a styled background.
 /// Renders into reusable CVPixelBuffers from a pool — minimizes per-frame allocs.
 final class Composer {
+    enum Layout {
+        case styled
+        case solidProbe
+        case passthrough
+    }
+
     let ciContext: CIContext
     let outputSize: CGSize
     let pixelBufferPool: CVPixelBufferPool
     let background: CIImage
-    let solidProbe: Bool
+    let layout: Layout
     let padRatio: CGFloat = 0.08
     // Tasteful "macOS window on desktop" shadow — visible but not heavy.
     let shadowBlur: Double = 55
@@ -294,7 +338,7 @@ final class Composer {
     let shadowOffsetY: Double = 35
     let shadowOpacity: Double = 0.7
 
-    init(outputW: Int, outputH: Int, solidProbe: Bool, background: CIImage) throws {
+    init(outputW: Int, outputH: Int, layout: Layout, background: CIImage) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw NSError(domain: "composer", code: 1, userInfo: [NSLocalizedDescriptionKey: "no Metal device"])
         }
@@ -303,7 +347,7 @@ final class Composer {
             .outputColorSpace: CGColorSpaceCreateDeviceRGB(),
         ])
         self.outputSize = CGSize(width: outputW, height: outputH)
-        self.solidProbe = solidProbe
+        self.layout = layout
 
         let attrs: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
@@ -332,11 +376,15 @@ final class Composer {
         let sourceCI = CIImage(cvPixelBuffer: srcBuffer)
 
         let composed: CIImage
-        if solidProbe {
+        switch layout {
+        case .solidProbe:
             let probeBg = CIImage(color: CIColor(red: 1, green: 0, blue: 0))
                 .cropped(to: CGRect(x: 0, y: 0, width: srcW, height: srcH))
             composed = sourceCI.composited(over: probeBg)
-        } else {
+        case .passthrough:
+            let transform = fitTransform(srcW: srcW, srcH: srcH, outputW: Int(outputSize.width), outputH: Int(outputSize.height), padRatio: 0)
+            composed = sourceCI.transformed(by: transform).composited(over: background)
+        case .styled:
             // Scale + position the window inside the canvas with padding.
             let transform = fitTransform(srcW: srcW, srcH: srcH, outputW: Int(outputSize.width), outputH: Int(outputSize.height), padRatio: padRatio)
             let positionedWindow = sourceCI.transformed(by: transform)
@@ -403,7 +451,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptureAudio
     private var takeCompleteFired = false
     private var sessionStartSeconds: Double = 0
 
-    init(outputURL: URL, outputW: Int, outputH: Int, withAudio: Bool, composer: Composer) throws {
+    init(outputURL: URL, outputW: Int, outputH: Int, bitrate: Int, withAudio: Bool, composer: Composer) throws {
         self.writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         self.composer = composer
 
@@ -412,7 +460,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptureAudio
             AVVideoWidthKey: outputW,
             AVVideoHeightKey: outputH,
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: 12_000_000,
+                AVVideoAverageBitRateKey: bitrate,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
             ],
         ]
@@ -555,8 +603,18 @@ func setupAudioCapture(recorder: Recorder) throws -> AVCaptureSession {
     return session
 }
 
-func run() async throws {
-    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+struct CaptureSetup {
+    let filter: SCContentFilter
+    let config: SCStreamConfiguration
+    let captureW: Int
+    let captureH: Int
+    let outW: Int
+    let outH: Int
+    let bitrate: Int
+    let composer: Composer
+}
+
+func windowCaptureSetup(windowID: CGWindowID, content: SCShareableContent) async throws -> CaptureSetup {
     guard let target = content.windows.first(where: { $0.windowID == windowID }) else {
         let available = content.windows.map { "\($0.windowID)=\($0.owningApplication?.applicationName ?? "?"):\($0.title ?? "")" }.joined(separator: "\n")
         throw NSError(domain: "recorder", code: 2, userInfo: [
@@ -607,9 +665,60 @@ func run() async throws {
             makeMeshGradientBackground(width: outW, height: outH)
         }
     }
-    let composer = try Composer(outputW: outW, outputH: outH, solidProbe: probeSolidRed, background: backgroundImage)
+    let composer = try Composer(outputW: outW, outputH: outH, layout: probeSolidRed ? .solidProbe : .styled, background: backgroundImage)
+    return CaptureSetup(filter: filter, config: config, captureW: pxW, captureH: pxH, outW: outW, outH: outH, bitrate: WINDOW_BITRATE, composer: composer)
+}
 
-    let recorder = try Recorder(outputURL: partialURL, outputW: outW, outputH: outH, withAudio: captureAudio, composer: composer)
+func displayCaptureSetup(displayID: CGDirectDisplayID, content: SCShareableContent) throws -> CaptureSetup {
+    guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+        let available = content.displays.map { "\($0.displayID) \($0.width)x\($0.height)" }.joined(separator: "\n")
+        throw NSError(domain: "recorder", code: 4, userInfo: [
+            NSLocalizedDescriptionKey: "display \(displayID) not found. Available:\n\(available)",
+        ])
+    }
+    let excluded = content.applications.filter { $0.processID == excludedPID }
+    if let excludedPID, excluded.isEmpty {
+        FileHandle.standardError.write(Data("recorder: no running application with pid \(excludedPID) to exclude\n".utf8))
+    }
+    let filter = SCContentFilter(display: display, excludingApplications: excluded, exceptingWindows: [])
+
+    let pixelW = Int((filter.contentRect.width * CGFloat(filter.pointPixelScale)).rounded())
+    let pixelH = Int((filter.contentRect.height * CGFloat(filter.pointPixelScale)).rounded())
+    let (outW, outH) = displayOutputSize(pixelWidth: pixelW, pixelHeight: pixelH)
+    FileHandle.standardError.write(Data("recorder: target display \(displayID) — \(pixelW)x\(pixelH) px\(excluded.isEmpty ? "" : ", excluding pid \(excluded[0].processID) \(excluded[0].applicationName)")\n".utf8))
+
+    let config = SCStreamConfiguration()
+    config.width = outW
+    config.height = outH
+    config.pixelFormat = kCVPixelFormatType_32BGRA
+    config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+    config.queueDepth = 8
+    config.showsCursor = true
+    config.scalesToFit = true
+
+    let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0))
+        .cropped(to: CGRect(x: 0, y: 0, width: outW, height: outH))
+    let composer = try Composer(outputW: outW, outputH: outH, layout: .passthrough, background: black)
+    return CaptureSetup(filter: filter, config: config, captureW: outW, captureH: outH, outW: outW, outH: outH, bitrate: displayBitrate(width: outW, height: outH), composer: composer)
+}
+
+func run() async throws {
+    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    let setup: CaptureSetup
+    switch captureTarget {
+    case let .window(windowID):
+        setup = try await windowCaptureSetup(windowID: windowID, content: content)
+    case let .display(displayID):
+        setup = try displayCaptureSetup(displayID: displayID, content: content)
+    }
+    let filter = setup.filter
+    let config = setup.config
+    let pxW = setup.captureW
+    let pxH = setup.captureH
+    let outW = setup.outW
+    let outH = setup.outH
+
+    let recorder = try Recorder(outputURL: partialURL, outputW: outW, outputH: outH, bitrate: setup.bitrate, withAudio: captureAudio, composer: setup.composer)
 
     let stream = SCStream(filter: filter, configuration: config, delegate: recorder)
     let videoQueue = DispatchQueue(label: "windowclip.recorder.video", qos: .userInteractive)

@@ -39,6 +39,33 @@ final class ThumbnailProvider {
 
     func cached(_ id: CGWindowID) -> CGImage? { cache[id] }
 
+    func thumbnail(for display: CapturableDisplay) async -> CGImage? {
+        guard let shareable,
+              let target = shareable.displays.first(where: { $0.displayID == display.id })
+        else { return nil }
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let filter = SCContentFilter(
+            display: target,
+            excludingApplications: shareable.applications.filter { $0.processID == ownPID },
+            exceptingWindows: []
+        )
+        let config = SCStreamConfiguration()
+        let w = max(CGFloat(target.width), 1)
+        let h = max(CGFloat(target.height), 1)
+        let scale = Self.maxEdge / max(w, h)
+        config.width = max(Int((w * scale).rounded()), 1)
+        config.height = max(Int((h * scale).rounded()), 1)
+        config.showsCursor = false
+        config.captureResolution = .best
+
+        do {
+            return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
     func thumbnail(for window: CapturableWindow) async -> CGImage? {
         if let hit = cache[window.id] { return hit }
         guard let shareable else { return nil }

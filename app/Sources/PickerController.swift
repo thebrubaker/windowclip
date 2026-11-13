@@ -23,8 +23,8 @@ final class PickerController {
     private let model = PickerModel()
     private let thumbnails = ThumbnailProvider()
 
-    /// Called with the chosen window. The picker closes itself first.
-    var onPick: (CapturableWindow) -> Void = { _ in }
+    /// Called with the chosen window or display. The picker closes itself first.
+    var onPick: (CaptureTarget) -> Void = { _ in }
     /// Called when the user dismissed without choosing.
     var onCancel: () -> Void = {}
 
@@ -44,9 +44,10 @@ final class PickerController {
 
     // MARK: - Lifecycle
 
-    func show() {
+    func show(selectingScreens: Bool = false) {
+        model.displays = DisplayEnumerator.list()
         model.windows = WindowEnumerator.list()
-        model.selected = 0
+        model.selected = selectingScreens || model.windows.isEmpty ? 0 : model.displays.count
         model.notice = model.windows.isEmpty ? "No recordable windows on screen" : nil
 
         let panel = panel ?? makePanel()
@@ -55,6 +56,10 @@ final class PickerController {
         panel.makeKeyAndOrderFront(nil)
         installKeyMonitor()
         startThumbnails()
+    }
+
+    func selectScreens() {
+        model.selected = 0
     }
 
     func close(cancelled: Bool) {
@@ -80,6 +85,12 @@ final class PickerController {
                 note("ScreenCaptureKit refused: \(error)")
                 model.notice = "Screen Recording permission needed for previews"
                 return
+            }
+            for display in model.displays {
+                if Task.isCancelled { return }
+                if let image = await thumbnails.thumbnail(for: display) {
+                    model.displayThumbnails[display.id] = image
+                }
             }
             for window in model.windows {
                 if Task.isCancelled { return }
@@ -108,7 +119,7 @@ final class PickerController {
     /// Returns true when the key was consumed.
     private func handle(_ event: NSEvent) -> Bool {
         guard isVisible else { return false }
-        let count = model.windows.count
+        let count = model.items.count
         guard count > 0 else {
             if event.keyCode == 53 { close(cancelled: true); return true }
             return false
@@ -117,10 +128,10 @@ final class PickerController {
         switch event.keyCode {
         case 123: move(by: -1)                          // ←
         case 124: move(by: 1)                           // →
-        case 126: move(by: -Theme.pickerColumns)        // ↑
-        case 125: move(by: Theme.pickerColumns)         // ↓
+        case 126: moveRow(by: -1)                       // ↑
+        case 125: moveRow(by: 1)                        // ↓
         case 36, 76:                                    // return / enter
-            let picked = model.windows[model.selected]
+            let picked = model.items[model.selected]
             close(cancelled: false)
             onPick(picked)
         case 53:                                        // esc
@@ -134,9 +145,20 @@ final class PickerController {
     /// Clamps rather than wraps. Wrapping in a ragged grid makes ↓ on the last
     /// row jump somewhere the user didn't point at.
     private func move(by delta: Int) {
-        let count = model.windows.count
+        let count = model.items.count
         guard count > 0 else { return }
         model.selected = min(max(model.selected + delta, 0), count - 1)
+    }
+
+    private func moveRow(by delta: Int) {
+        let rows = model.rows
+        guard let row = rows.firstIndex(where: { $0.contains(model.selected) }),
+              let column = rows[row].firstIndex(of: model.selected)
+        else { return }
+        let next = row + delta
+        if next < 0 { model.selected = 0; return }
+        if next >= rows.count { model.selected = model.items.count - 1; return }
+        model.selected = rows[next][min(column, rows[next].count - 1)]
     }
 
     // MARK: - Panel
@@ -169,9 +191,9 @@ final class PickerController {
     private func makeRootView() -> PickerView {
         PickerView(
             model: model,
-            onPick: { [weak self] window in
+            onPick: { [weak self] target in
                 self?.close(cancelled: false)
-                self?.onPick(window)
+                self?.onPick(target)
             },
             onClose: { [weak self] in self?.close(cancelled: true) }
         )

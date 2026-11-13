@@ -58,6 +58,11 @@ Options:
 
 Hold onto the chosen `windowId`.
 
+**The whole screen instead.** When Joel wants his desktop rather than one window,
+pass `--display main` (the menu-bar display) or a `displayId` from
+`bun run src/cli.ts list-displays` in place of `--window-id`. The file is the
+screen as it is, with no background; `--background` is refused.
+
 ### 2. Pick an output path
 
 Default to `~/Code/stage-studio/out/<slug>-<YYYYMMDD-HHMMSS>.mp4`, where `<slug>`

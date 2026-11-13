@@ -222,6 +222,11 @@ type Args = {
   /** Specific CGWindowID to record. Preferred over --window when Claude pipes
    *  an exact id from `cmd/windows list`. Skips the fuzzy-match path entirely. */
   windowId?: number;
+  /** Record a whole display instead: a CGDirectDisplayID from `list-displays`,
+   *  or `main`. No background, padding or shadow. */
+  display?: string;
+  /** `windowclip list-displays`: print connected displays as JSON and exit. */
+  listDisplays: boolean;
   /** Subcommand short-circuit: print all on-screen windows as JSON and exit.
    *  Intended for the /stage skill — gives it a window picker without depending
    *  on the bundled cmd/windows binary path. */
@@ -251,6 +256,7 @@ function parseArgs(argv: string[]): Args {
     label: "Claude",
     source: "agent",
     listBackgrounds: false,
+    listDisplays: false,
   };
   // Control subcommands: `windowclip stop|cancel|status`.
   if (argv[0] === "stop" || argv[0] === "cancel" || argv[0] === "status") {
@@ -271,6 +277,10 @@ function parseArgs(argv: string[]): Args {
   if (argv[0] === "log") {
     showLog(argv.slice(1));
   }
+  if (argv[0] === "list-displays") {
+    args.listDisplays = true;
+    return args;
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--duration" || a === "-t") args.duration = Number(argv[++i]);
@@ -279,12 +289,13 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--skip-record") args.skipRecord = true;
     else if (a === "--window" || a === "-w") args.window = argv[++i];
     else if (a === "--window-id") args.windowId = Number(argv[++i]);
+    else if (a === "--display" || a === "-d") args.display = argv[++i];
     else if (a === "--headless") args.headless = true;
     else if (a === "--label") args.label = argv[++i];
     else if (a === "--source") args.source = argv[++i] === "human" ? "human" : "agent";
     else if (a === "--background" || a === "-b") args.background = argv[++i];
     else if (a === "-h" || a === "--help") {
-      console.log(`windowclip — record a window + render polished MP4
+      console.log(`windowclip — record a window (or a whole screen) as a polished MP4
 
 Recordings route through the Windowclip app by default, so every recording
 shows the on-screen pill and can be stopped by hand (Esc / click / ⌥⌘R).
@@ -295,6 +306,7 @@ Usage:
   windowclip cancel                 abort and delete the partial file
   windowclip status                 print what the app is doing, as JSON
   windowclip list-windows           print on-screen windows as JSON and exit
+  windowclip list-displays          print connected displays as JSON and exit
   windowclip backgrounds            print the saved backgrounds and which one
                                     recordings use, as JSON
   windowclip log [-n N] [-f]        print the app's log (last N lines, default
@@ -312,6 +324,11 @@ Recording options:
                         app+title; default: frontmost non-terminal window)
       --window-id <N>   target specific CGWindowID (numeric). Use this when
                         you have an exact id from \`windowclip list-windows\`.
+  -d, --display <id>    record a whole display instead of a window: a
+                        displayId from \`windowclip list-displays\`, or \`main\`
+                        for the one with the menu bar. The screen as it is: no
+                        background, padding or shadow, at its own aspect ratio
+                        (fit within 3840x2160). The pill stays out of it.
       --label <name>    who the pill credits for the recording (default Claude)
       --source <who>    agent (default) or human — picks the pill's treatment
   -b, --background <b>  this recording only: a saved background's name or id
@@ -485,7 +502,8 @@ export function commitClicks(clicks: Click[], cursor: CursorSample[]): Click[] {
   });
 }
 
-async function record(args: Args, windowID: number, outputPath: string, workDir: string, background: string) {
+/** The recorder's first argument: a window id, or `display:<id|main>`. */
+async function record(args: Args, target: string, outputPath: string, workDir: string, background: string) {
   // v3: recorder owns the whole pipeline — captures, composites onto a styled
   // background via Core Image, and outputs the final H.264 MP4 directly. No
   // post-recording stage needed.
@@ -515,7 +533,7 @@ async function record(args: Args, windowID: number, outputPath: string, workDir:
   //
   const recorderProc = spawn(
     RECORDER_BIN,
-    [String(windowID), String(args.duration), outputPath],
+    [target, String(args.duration), outputPath],
     {
       stdio: ["ignore", "inherit", "inherit"],
       env: {
@@ -559,14 +577,16 @@ async function record(args: Args, windowID: number, outputPath: string, workDir:
 async function recordViaApp(args: Args) {
   await ensureApp();
 
-  const windowId = args.windowId ?? (await detectWindow({ pattern: args.window })).windowId;
+  const target = args.display !== undefined
+    ? { displayId: displayIdArg(args.display) }
+    : { windowId: args.windowId ?? (await detectWindow({ pattern: args.window })).windowId };
   // A path is made absolute here, since the app doesn't share our cwd; a name
   // goes as-is and the app resolves it against its saved set.
   const background =
     args.background && existsSync(args.background) ? resolve(args.background) : args.background;
   const started = await control({
     command: "start",
-    windowId,
+    ...target,
     ...(args.output ? { output: resolve(args.output) } : {}),
     source: args.source,
     label: args.label,
@@ -583,6 +603,10 @@ async function recordViaApp(args: Args) {
       process.exit(3);
     }
     if (started.error === "background_not_found") unknownBackground(args.background ?? "");
+    if (started.error === "display_not_found") {
+      console.error(`[windowclip] no connected display with id ${args.display} — see \`windowclip list-displays\`.`);
+      process.exit(2);
+    }
     if (started.cancelled) {
       console.error(`[windowclip] cancelled during the countdown — nothing recorded.`);
       process.exit(4);
@@ -682,8 +706,31 @@ function showLog(rest: string[]): never {
   process.exit(proc.exitCode ?? 1);
 }
 
+/** `main` passes through by name; anything else must be a numeric display id. */
+function displayIdArg(display: string): number | "main" {
+  if (display === "main") return "main";
+  const id = Number(display);
+  if (!Number.isInteger(id) || id < 0) {
+    console.error(`[windowclip] --display takes a displayId from \`windowclip list-displays\`, or \`main\` — got "${display}".`);
+    process.exit(1);
+  }
+  return id;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+
+  if (args.display !== undefined) {
+    displayIdArg(args.display);
+    if (args.window !== undefined || args.windowId !== undefined) {
+      console.error(`[windowclip] --display records a whole screen; drop --window / --window-id.`);
+      process.exit(1);
+    }
+    if (args.background !== undefined) {
+      console.error(`[windowclip] a screen recording has no background; drop --background.`);
+      process.exit(1);
+    }
+  }
 
   if (args.controlCommand) {
     await runControlCommand(args.controlCommand);
@@ -703,6 +750,16 @@ async function main() {
       process.exit(1);
     }
     const proc = spawn(WINDOWS_BIN, ["list"], { stdio: "inherit" });
+    proc.on("close", (code) => process.exit(code ?? 1));
+    return;
+  }
+
+  if (args.listDisplays) {
+    if (!existsSync(WINDOWS_BIN)) {
+      console.error(`[windowclip] windows binary missing at ${WINDOWS_BIN} — run \`pnpm run build:windows\``);
+      process.exit(1);
+    }
+    const proc = spawn(WINDOWS_BIN, ["displays"], { stdio: "inherit" });
     proc.on("close", (code) => process.exit(code ?? 1));
     return;
   }
@@ -729,6 +786,15 @@ async function main() {
   const workDir = args.workDir;
   const outputPath = args.output ? resolve(args.output) : defaultOutputPath();
 
+  if (args.display !== undefined) {
+    const target = `display:${displayIdArg(args.display)}`;
+    console.error(`[windowclip] target: ${target}`);
+    const { t0Epoch } = await record(args, target, outputPath, workDir, "");
+    writeFileSync(resolve(workDir, "meta.json"), JSON.stringify({ t0Epoch, display: args.display }, null, 2));
+    console.error(`[windowclip] wrote ${outputPath}`);
+    return;
+  }
+
   // v3: detect the target window BEFORE recording. SCK records ONLY that window's
   // content (occlusion-immune); recorder composites onto a styled background
   // and writes the final MP4 directly. No post-recording stage.
@@ -750,7 +816,7 @@ async function main() {
       (existsSync(DEFAULT_BACKGROUND) ? DEFAULT_BACKGROUND : ""));
   console.error(`[windowclip] background: ${background || "(mesh gradient)"}`);
 
-  const { clicksPath, t0Epoch } = await record(args, windowInfo.windowId, outputPath, workDir, background);
+  const { clicksPath, t0Epoch } = await record(args, String(windowInfo.windowId), outputPath, workDir, background);
   writeFileSync(resolve(workDir, "meta.json"), JSON.stringify({ t0Epoch, windowInfo }, null, 2));
 
   // Load click/cursor data for diagnostics (and future overlay features).

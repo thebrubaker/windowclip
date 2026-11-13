@@ -112,6 +112,9 @@ bun run cli --duration 10 --window "Linear" --output ./demo.mp4
 # open-ended: returns as soon as capture is underway, then stop when you like
 bun run cli --duration 0 --window-id 8387 --output ./demo.mp4
 bun run cli stop
+
+# the whole screen instead of a window (the menu-bar display, or an id)
+bun run cli --duration 10 --display main --output ./desktop.mp4
 ```
 
 `start` never answers optimistically — it holds until the countdown has run out, so you learn `recording` or `cancelled`, not a "started" you vetoed a second later. Exit codes say which: **3** busy (a session is already live — it will never queue or preempt), **4** cancelled by hand, **2** the app isn't running, **1** everything else.
@@ -120,6 +123,7 @@ bun run cli stop
 bun run cli status          # what the app is doing, as JSON
 bun run cli cancel          # abort and delete the partial file
 bun run cli list-windows    # on-screen windows as JSON
+bun run cli list-displays   # connected displays as JSON (displayId, name, size)
 bun run cli --headless ...  # bypass the app entirely (see below)
 ```
 
@@ -127,7 +131,7 @@ bun run cli --headless ...  # bypass the app entirely (see below)
 
 #### How the CLI talks to the app
 
-A Unix domain socket at `~/Library/Application Support/Windowclip/control.sock`, mode 0600, one JSON request per connection: `ping` / `status` / `start` / `stop` / `cancel`. A socket file was chosen over the alternatives on permission grounds — a URL scheme can't answer back, a localhost port can raise the firewall prompt, and Apple Events would add an Automation grant. A socket adds no TCC surface at all.
+A Unix domain socket at `~/Library/Application Support/Windowclip/control.sock`, mode 0600, one JSON request per connection: `ping` / `status` / `start` / `stop` / `cancel`. `start` takes `windowId`, or `displayId` (a number, or `"main"`) for a screen recording. A socket file was chosen over the alternatives on permission grounds — a URL scheme can't answer back, a localhost port can raise the firewall prompt, and Apple Events would add an Automation grant. A socket adds no TCC surface at all.
 
 ### 3. The hotkey app (no Claude session needed)
 
@@ -194,7 +198,7 @@ touches a file that was already at that path.
 
 | Step | What you see |
 |------|--------------|
-| `⌥⌘R` | Centered picker panel — live thumbnails of every on-screen window |
+| `⌥⌘R` | Centered picker panel — live thumbnails of every display (**Screens**), then every on-screen window. The selection starts on the first window |
 | `←→↑↓` / mouse | Move the selection |
 | `↩` or click | Pick it |
 | — | A pill appears bottom-center and counts down **3 · 2 · 1**, naming the app |
@@ -210,6 +214,16 @@ while you're reaching for it. Moving off restarts the timer.
 
 `esc` cancels at any point. Cancelling the countdown writes nothing at all;
 cancelling a recording stops the recorder and deletes the partial file.
+
+**Recording the whole screen.** Pick a tile in the picker's **Screens** row, or
+choose **Record Entire Screen…** in the menu (the picker, opened on that row).
+The countdown, the pill and the stop controls are the same as for a window. The
+recording is the display as it is: no background, padding or shadow, the real
+cursor, at the display's own aspect ratio, fit within 3840×2160 (the hardware
+H.264 encoder refuses 5K). Windowclip's own windows are left out of the capture,
+so the pill stays on your screen to stop with but never appears in the file. The
+menu bar is drawn by the system, so Windowclip's menu bar icon and macOS's
+recording indicator do appear.
 
 **On `esc`:** it's a global hotkey, so it's grabbed from every other app while
 it's registered — which is why it's registered *only* for the seconds a pill is
@@ -266,7 +280,7 @@ APP="app/build/Windowclip.app/Contents/MacOS/Windowclip"
 "$APP" --debug-show pill-countdown --debug-agent --debug-midline
 "$APP" --debug-show pill-recording --debug-agent --debug-label "Claude"
 
-# drive the whole session against one window, then quit
+# drive the whole session against one window (or display:main), then quit
 "$APP" --debug-record "Safari" --debug-record-seconds 5
 "$APP" --debug-record "Safari" --debug-record-seconds 3 \
        --debug-record-output /tmp/take.mp4   # somewhere disposable
@@ -385,11 +399,13 @@ echo '{"command":"escape"}' | nc -U "$SOCK"
   windowclip status           what the app is doing, as JSON
   windowclip list-windows     on-screen windows as JSON
   windowclip log [-n N] [-f]  the app's log, last N lines (-f follows)
+  windowclip list-displays    connected displays as JSON
 
   -t, --duration <s>    seconds, or 0 for open-ended (5min cap either way)
   -o, --output <path>   final MP4 path (default ~/Desktop/recording-<time>.mp4)
   -w, --window <pat>    target window pattern (case-insensitive substring)
       --window-id <N>   target specific CGWindowID (`windowclip list-windows`)
+  -d, --display <id>    the whole display instead: a displayId or `main`
       --label <name>    who the pill credits (default Claude)
       --source <who>    agent (default) or human — picks the pill's treatment
       --headless        bypass the app: direct recorder spawn, no pill
@@ -402,6 +418,7 @@ echo '{"command":"escape"}' | nc -U "$SOCK"
 ./cmd/windows/windows list           # all on-screen windows as JSON
 ./cmd/windows/windows frontmost      # frontmost non-terminal window
 ./cmd/windows/windows find Slack     # fuzzy match on app/title
+./cmd/windows/windows displays       # connected displays
 ```
 
 ---
@@ -484,7 +501,7 @@ This repo contains the trajectory of a few earlier attempts, kept as reference:
 - **No pause.** Stop and re-record covers the same need with less mechanism.
 - **SIGKILL on the recorder loses the recording.** It doesn't give AVAssetWriter time to finalize the MP4. Every normal stop path (the pill, `esc`, `⌥⌘R`, `windowclip stop`) traps cleanly; only a hard kill of the app or a `--headless` recorder can lose a take.
 - **A stop that arrives after you already stopped by hand reports `not_recording`.** The file is fine — the app finalized it when you hit `esc` — but the CLI's stop response can't tell that apart from "there was never a session". Check `windowclip status` for the saved path.
-- **Mac-only, single display, no webcam, no system audio (mic only).**
+- **Mac-only, one display per recording, no webcam, no system audio (mic only).**
 - **The hotkey app is signed but not notarized yet.** `spctl` rejects it as
   "Unnotarized Developer ID". A locally built copy has no quarantine flag so it
   launches fine; a copy that travels (DMG, download) would be blocked until
