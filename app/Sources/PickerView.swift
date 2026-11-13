@@ -8,17 +8,30 @@ import SwiftUI
 
 @MainActor
 final class PickerModel: ObservableObject {
+    @Published var displays: [CapturableDisplay] = []
     @Published var windows: [CapturableWindow] = []
     @Published var thumbnails: [CGWindowID: CGImage] = [:]
+    @Published var displayThumbnails: [CGDirectDisplayID: CGImage] = [:]
     @Published var selected: Int = 0
     /// Shown in place of the footer hints when Screen Recording hasn't been
     /// granted — the picker still lists windows, it just can't preview them.
     @Published var notice: String?
+
+    var items: [CaptureTarget] { displays.map(CaptureTarget.display) + windows.map(CaptureTarget.window) }
+
+    var rows: [[Int]] {
+        func chunk(_ range: Range<Int>) -> [[Int]] {
+            stride(from: range.lowerBound, to: range.upperBound, by: Theme.pickerColumns).map {
+                Array($0..<min($0 + Theme.pickerColumns, range.upperBound))
+            }
+        }
+        return chunk(0..<displays.count) + chunk(displays.count..<(displays.count + windows.count))
+    }
 }
 
 struct PickerView: View {
     @ObservedObject var model: PickerModel
-    var onPick: (CapturableWindow) -> Void
+    var onPick: (CaptureTarget) -> Void
     var onClose: () -> Void
 
     private var columns: [GridItem] {
@@ -49,7 +62,7 @@ struct PickerView: View {
 
     private var header: some View {
         HStack {
-            Text("Record a window")
+            Text("Record")
                 .font(.system(size: 11, weight: .medium))
                 .tracking(1.4)
                 .textCase(.uppercase)
@@ -67,16 +80,20 @@ struct PickerView: View {
     private var grid: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVGrid(columns: columns, spacing: Theme.pickerGridGap) {
-                    ForEach(Array(model.windows.enumerated()), id: \.element.id) { index, window in
-                        PickerCell(
-                            window: window,
-                            thumbnail: model.thumbnails[window.id],
-                            isSelected: index == model.selected
-                        )
-                        .id(window.id)
-                        .onTapGesture { onPick(window) }
-                        .onHover { if $0 { model.selected = index } }
+                VStack(alignment: .leading, spacing: Theme.pickerGridGap) {
+                    sectionLabel("Screens")
+                    LazyVGrid(columns: columns, spacing: Theme.pickerGridGap) {
+                        ForEach(Array(model.displays.enumerated()), id: \.element.id) { index, display in
+                            cell(.display(display), thumbnail: model.displayThumbnails[display.id], index: index)
+                        }
+                    }
+                    if !model.windows.isEmpty {
+                        sectionLabel("Windows")
+                        LazyVGrid(columns: columns, spacing: Theme.pickerGridGap) {
+                            ForEach(Array(model.windows.enumerated()), id: \.element.id) { offset, window in
+                                cell(.window(window), thumbnail: model.thumbnails[window.id], index: model.displays.count + offset)
+                            }
+                        }
                     }
                 }
                 .padding(Theme.pickerPadding)
@@ -86,12 +103,35 @@ struct PickerView: View {
             // Arrow keys must be able to reach windows below the fold, so the
             // grid follows the selection instead of stranding it off-screen.
             .onChange(of: model.selected) { _, index in
-                guard model.windows.indices.contains(index) else { return }
+                guard model.items.indices.contains(index) else { return }
                 withAnimation(.easeOut(duration: 0.12)) {
-                    proxy.scrollTo(model.windows[index].id, anchor: .center)
+                    proxy.scrollTo(cellID(model.items[index]), anchor: .center)
                 }
             }
         }
+    }
+
+    private func cell(_ target: CaptureTarget, thumbnail: CGImage?, index: Int) -> some View {
+        PickerCell(target: target, thumbnail: thumbnail, isSelected: index == model.selected)
+            .id(cellID(target))
+            .onTapGesture { onPick(target) }
+            .onHover { if $0 { model.selected = index } }
+    }
+
+    private func cellID(_ target: CaptureTarget) -> String {
+        switch target {
+        case let .window(window): return "window-\(window.id)"
+        case let .display(display): return "display-\(display.id)"
+        }
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .medium))
+            .tracking(1.2)
+            .textCase(.uppercase)
+            .foregroundStyle(Color.white.opacity(0.30))
+            .padding(.horizontal, Theme.pickerCellPadding)
     }
 
     private var footer: some View {
@@ -136,9 +176,30 @@ struct PickerView: View {
 // MARK: - Cell
 
 private struct PickerCell: View {
-    let window: CapturableWindow
+    let target: CaptureTarget
     let thumbnail: CGImage?
     let isSelected: Bool
+
+    private var appIcon: NSImage? {
+        if case let .window(window) = target { return window.icon }
+        return nil
+    }
+
+    private var title: String {
+        switch target {
+        case let .window(window): return window.app
+        case let .display(display): return display.name
+        }
+    }
+
+    private var subtitle: String {
+        switch target {
+        case let .window(window): return window.subtitle
+        case let .display(display):
+            let size = "\(Int(display.sizeInPoints.width)) × \(Int(display.sizeInPoints.height))"
+            return display.isMain ? "Main display · \(size)" : size
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -169,7 +230,7 @@ private struct PickerCell: View {
                     Image(decorative: thumbnail, scale: 1)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                } else if let icon = window.icon {
+                } else if let icon = appIcon {
                     // Placeholder while SCK is still working (or has been
                     // refused): the app's own icon, dimmed. Honest about being
                     // a stand-in rather than faking a preview.
@@ -190,8 +251,13 @@ private struct PickerCell: View {
     private var label: some View {
         HStack(spacing: 7) {
             Group {
-                if let icon = window.icon {
+                if let icon = appIcon {
                     Image(nsImage: icon).resizable().aspectRatio(contentMode: .fit)
+                } else if target.isDisplay {
+                    Image(systemName: "display")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .foregroundStyle(Color.white.opacity(0.70))
                 } else {
                     RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.12))
                 }
@@ -199,12 +265,12 @@ private struct PickerCell: View {
             .frame(width: Theme.pickerIconSize, height: Theme.pickerIconSize)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(window.app)
+                Text(title)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.85))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                Text(window.subtitle)
+                Text(subtitle)
                     .font(.system(size: 10.5))
                     .foregroundStyle(Color.white.opacity(0.35))
                     .lineLimit(1)

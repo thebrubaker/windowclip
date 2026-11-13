@@ -231,15 +231,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             respond(session.statusPayload())
 
         case "start":
-            guard let windowId = request.int("windowId") else {
-                return respond(["ok": false, "error": "bad_request",
-                                "message": "start requires windowId"])
-            }
-            guard let window = WindowEnumerator.list()
-                .first(where: { $0.id == CGWindowID(windowId) })
-            else {
-                return respond(["ok": false, "error": "window_not_found",
-                                "message": "no on-screen window with id \(windowId)"])
+            let target: CaptureTarget
+            let asksForDisplay = request.body["displayId"] != nil
+            if asksForDisplay {
+                guard request.body["windowId"] == nil else {
+                    return respond(["ok": false, "error": "bad_request",
+                                    "message": "start takes windowId or displayId, not both"])
+                }
+                guard request.body["background"] == nil else {
+                    return respond(["ok": false, "error": "bad_request",
+                                    "message": "a screen recording has no background"])
+                }
+                let id: CGDirectDisplayID? = request.string("displayId") == "main"
+                    ? CGMainDisplayID()
+                    : request.int("displayId").map { CGDirectDisplayID($0) }
+                guard let id, let display = DisplayEnumerator.display(id: id) else {
+                    return respond(["ok": false, "error": "display_not_found",
+                                    "message": "no connected display with id \(request.body["displayId"] ?? "")"])
+                }
+                target = .display(display)
+            } else {
+                guard let windowId = request.int("windowId") else {
+                    return respond(["ok": false, "error": "bad_request",
+                                    "message": "start requires windowId or displayId"])
+                }
+                guard let window = WindowEnumerator.list()
+                    .first(where: { $0.id == CGWindowID(windowId) })
+                else {
+                    return respond(["ok": false, "error": "window_not_found",
+                                    "message": "no on-screen window with id \(windowId)"])
+                }
+                target = .window(window)
             }
             let source: SessionSource = {
                 guard request.string("source") != "human" else { return .human }
@@ -254,7 +276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 background = found
             }
-            session.start(window: window, source: source, output: output, background: background) { reply($0) }
+            session.start(target: target, source: source, output: output, background: background) { reply($0) }
 
         case "backgrounds":
             respond(Backgrounds.shared.payload())
@@ -314,6 +336,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         record.keyEquivalentModifierMask = [.command, .option]
         record.target = self
         menu.addItem(record)
+
+        let screen = NSMenuItem(
+            title: "Record Entire Screen…", action: #selector(recordScreenFromMenu), keyEquivalent: ""
+        )
+        screen.target = self
+        screen.isEnabled = true
+        menu.addItem(screen)
 
         menu.addItem(.separator())
         let header = NSMenuItem(title: "Recent Recordings", action: nil, keyEquivalent: "")
@@ -484,6 +513,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         session?.toggle()
     }
 
+    @objc private func recordScreenFromMenu() {
+        session?.pickScreen()
+    }
+
     /// The same reveal the saved pill performs — Finder, with the file selected.
     @objc private func revealRecent(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
@@ -503,17 +536,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// thing the hotkey runs.
     private func runEndToEnd(target: String) {
         let windows = WindowEnumerator.list()
-        let match: CapturableWindow? = {
+        let match: CaptureTarget? = {
+            if target == "display:main" {
+                return DisplayEnumerator.display(id: CGMainDisplayID()).map(CaptureTarget.display)
+            }
+            if target.hasPrefix("display:"), let id = UInt32(target.dropFirst("display:".count)) {
+                return DisplayEnumerator.display(id: id).map(CaptureTarget.display)
+            }
             if let id = UInt32(target) {
-                return windows.first { $0.id == id }
+                return windows.first { $0.id == id }.map(CaptureTarget.window)
             }
             let needle = target.lowercased()
-            return windows.first { "\($0.app) \($0.title)".lowercased().contains(needle) }
+            return windows.first { "\($0.app) \($0.title)".lowercased().contains(needle) }.map(CaptureTarget.window)
         }()
 
-        guard let window = match else {
+        guard let match else {
             FileHandle.standardError.write(Data(
-                "windowclip: no window matched \"\(target)\" among \(windows.count) on screen\n".utf8
+                "windowclip: nothing matched \"\(target)\" among \(windows.count) windows on screen\n".utf8
             ))
             exit(2)
         }
@@ -523,7 +562,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let session = SessionController(pill: pill)
         self.session = session
 
-        note("end-to-end: \(window.app) — \(window.title) [\(window.id)]")
+        switch match {
+        case let .window(window): note("end-to-end: \(window.app) — \(window.title) [\(window.id)]")
+        case let .display(display): note("end-to-end: display \(display.name) [\(display.id)]")
+        }
         session.onPhaseChange = { [weak self] phase in
             guard let self else { return }
             note("phase → \(phase)")
@@ -553,7 +595,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 break
             }
         }
-        session.start(window: window, output: options.debugRecordOutput.map { URL(fileURLWithPath: $0) })
+        session.start(target: match, output: options.debugRecordOutput.map { URL(fileURLWithPath: $0) })
 
         // Backstop: never leave a recorder running because a phase never arrived.
         DispatchQueue.main.asyncAfter(deadline: .now() + options.debugRecordSeconds + 30) {
@@ -1044,8 +1086,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if surface == "picker" {
             let picker = PickerController()
             self.picker = picker
-            picker.onPick = { window in
-                note("picked: \(window.app) — \(window.title) [\(window.id)]")
+            picker.onPick = { target in
+                switch target {
+                case let .window(window): note("picked: \(window.app) — \(window.title) [\(window.id)]")
+                case let .display(display): note("picked: display \(display.name) [\(display.id)]")
+                }
                 NSApp.terminate(nil)
             }
             picker.onCancel = {

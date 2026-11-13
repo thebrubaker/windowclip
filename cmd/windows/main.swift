@@ -16,6 +16,8 @@
 //   windows list             # all on-screen windows
 //   windows frontmost        # frontmost non-self window (excludes the calling terminal)
 //   windows find <pattern>   # case-insensitive substring match against app+title
+//   windows displays         # connected displays: id, name, main, point bounds
+//                            # (top-left origin) and pixel size
 
 import Cocoa
 import CoreGraphics
@@ -71,6 +73,34 @@ func listWindows() -> [WindowInfo] {
     return out
 }
 
+struct DisplayInfo: Codable {
+    let displayId: Int
+    let name: String
+    let main: Bool
+    let bounds: Bounds
+    let pixelWidth: Int
+    let pixelHeight: Int
+}
+
+func listDisplays() -> [DisplayInfo] {
+    let mainID = CGMainDisplayID()
+    return NSScreen.screens.compactMap { screen in
+        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+        let id = CGDirectDisplayID(number.uint32Value)
+        let bounds = CGDisplayBounds(id)
+        let mode = CGDisplayCopyDisplayMode(id)
+        return DisplayInfo(
+            displayId: Int(id),
+            name: screen.localizedName,
+            main: id == mainID,
+            bounds: Bounds(x: bounds.minX, y: bounds.minY, w: bounds.width, h: bounds.height),
+            pixelWidth: mode?.pixelWidth ?? Int(bounds.width * screen.backingScaleFactor),
+            pixelHeight: mode?.pixelHeight ?? Int(bounds.height * screen.backingScaleFactor)
+        )
+    }
+    .sorted { $0.main && !$1.main }
+}
+
 func emitJSON<T: Encodable>(_ value: T) {
     let enc = JSONEncoder()
     enc.outputFormatting = [.sortedKeys]
@@ -102,6 +132,9 @@ let mode = args.count >= 2 ? args[1] : "list"
 switch mode {
 case "list":
     emitJSON(listWindows())
+
+case "displays":
+    emitJSON(listDisplays())
 
 case "frontmost":
     // Frontmost = first window with the lowest CG ordering for the frontmost-app's pid.
@@ -151,6 +184,6 @@ case "find":
     }
 
 default:
-    FileHandle.standardError.write(Data("unknown mode: \(mode). usage: windows [list|frontmost|find <pattern>]\n".utf8))
+    FileHandle.standardError.write(Data("unknown mode: \(mode). usage: windows [list|frontmost|find <pattern>|displays]\n".utf8))
     exit(64)
 }

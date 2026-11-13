@@ -90,7 +90,7 @@ final class SessionController {
     private let pill: PillController
     private let recorder = Recorder()
 
-    private var target: CapturableWindow?
+    private var target: CaptureTarget?
     private var countdownRemaining = 0
     private var timer: Timer?
     private var savedDismissWork: DispatchWorkItem?
@@ -113,6 +113,8 @@ final class SessionController {
     private var startWaiter: ((SessionResult) -> Void)?
     private var stopWaiter: ((SessionResult) -> Void)?
 
+    private let fullScreenClaimsEscape = true
+
     /// Mockup's 3·2·1.
     private let countdownSeconds = 3
     /// How long to hold after the countdown for capture to come up, before
@@ -126,7 +128,7 @@ final class SessionController {
         self.pill.onStop = { [weak self] in self?.stop(reason: "pill") }
         self.pill.onReveal = { [weak self] url in self?.reveal(url) }
         self.pill.onHoverChanged = { [weak self] hovering in self?.savedHoverChanged(hovering) }
-        picker.onPick = { [weak self] window in self?.beginCountdown(for: window, request: .human) }
+        picker.onPick = { [weak self] target in self?.beginCountdown(for: target, request: .human) }
         picker.onCancel = { [weak self] in self?.phase = .idle }
     }
 
@@ -151,6 +153,20 @@ final class SessionController {
         }
     }
 
+    func pickScreen() {
+        switch phase {
+        case .idle:
+            showPicker(selectingScreens: true)
+        case .saved:
+            dismissSaved()
+            showPicker(selectingScreens: true)
+        case .picking:
+            picker.selectScreens()
+        case .countdown, .recording:
+            toggle()
+        }
+    }
+
     /// Esc, while a pill is up.
     func escape(via reason: String = "esc") {
         switch phase {
@@ -168,7 +184,7 @@ final class SessionController {
     /// `completion` fires once the outcome is real: recording underway, or the
     /// user cancelled during the countdown.
     func start(
-        window: CapturableWindow,
+        target: CaptureTarget,
         source: SessionSource = .human,
         output: URL? = nil,
         background: Background? = nil,
@@ -185,7 +201,7 @@ final class SessionController {
             return
         }
         self.startWaiter = completion
-        beginCountdown(for: window, request: SessionRequest(source: source, output: output, background: background))
+        beginCountdown(for: target, request: SessionRequest(source: source, output: output, background: background))
     }
 
     /// Stop from outside (control surface / debug harness / status menu).
@@ -229,10 +245,18 @@ final class SessionController {
             "source": source.isAgent ? "agent" : "human",
         ]
         if let label = source.label { payload["label"] = label }
-        if let target { payload["windowId"] = Int(target.id); payload["app"] = target.app }
+        switch target {
+        case let .window(window)?:
+            payload["windowId"] = Int(window.id); payload["app"] = window.app
+        case let .display(display)?:
+            payload["displayId"] = Int(display.id); payload["display"] = display.name
+        case nil:
+            break
+        }
         if let output = recorder.outputURL { payload["output"] = output.path }
         let live = phase == .countdown || phase == .recording
-        if let background = (live ? activeBackground : nil) ?? Backgrounds.shared.current {
+        let recordsBackground = !(live && target?.isDisplay == true)
+        if recordsBackground, let background = (live ? activeBackground : nil) ?? Backgrounds.shared.current {
             payload["background"] = background.id
         }
         if phase == .recording { payload["elapsed"] = recorder.elapsed }
@@ -265,38 +289,40 @@ final class SessionController {
 
     // MARK: - Picking
 
-    private func showPicker() {
+    private func showPicker(selectingScreens: Bool = false) {
         phase = .picking
-        picker.show()
+        picker.show(selectingScreens: selectingScreens)
     }
 
     // MARK: - Countdown
 
-    private func beginCountdown(for window: CapturableWindow, request: SessionRequest) {
+    private func beginCountdown(for target: CaptureTarget, request: SessionRequest) {
         self.request = request
         takeNumber += 1
-        target = window
+        self.target = target
         phase = .countdown
         countdownRemaining = countdownSeconds
 
         // Esc becomes ours for exactly as long as the pill is up — for agent
         // sessions just as much as human ones. The countdown IS the user's veto
         // window, so it has to run identically no matter who asked.
-        HotkeyManager.shared.register(.escape) { [weak self] in self?.escape() }
+        if !target.isDisplay || fullScreenClaimsEscape {
+            HotkeyManager.shared.register(.escape) { [weak self] in self?.escape() }
+        }
 
         pill.source = source
-        pill.show(.countdown(remaining: countdownRemaining, appName: window.app))
+        pill.show(.countdown(remaining: countdownRemaining, appName: target.label))
         startTimer(interval: 1) { [weak self] in self?.tickCountdown() }
 
         // The countdown is dead time we were paying twice: the user waited it
         // out, and then the recording separately lost however long start-up
         // took. Warming here spends it once.
-        prepareRecorder(for: window)
+        prepareRecorder(for: target)
     }
 
     /// Spawn the recorder now and let it warm. It captures but discards frames
     /// until `go()`, so nothing of the countdown lands in the file.
-    private func prepareRecorder(for window: CapturableWindow) {
+    private func prepareRecorder(for target: CaptureTarget) {
         let output = request.output ?? Recorder.defaultOutputURL()
         preparedOutput = output
         recorder.onArmed = { [weak self] in self?.recorderArmed() }
@@ -305,14 +331,19 @@ final class SessionController {
             try FileManager.default.createDirectory(
                 at: output.deletingLastPathComponent(), withIntermediateDirectories: true
             )
-            let background = request.background ?? Backgrounds.shared.current
+            let background = target.isDisplay ? nil : (request.background ?? Backgrounds.shared.current)
             activeBackground = background
             let backgroundOrigin = request.background != nil ? "request" : (background?.isDefault ?? true) ? "default" : "saved"
+            let targetDescription: String
+            switch target {
+            case let .window(window): targetDescription = "window=\(window.id) app=\(window.app)"
+            case let .display(display): targetDescription = "display=\(display.id) name=\(display.name)"
+            }
             Log.write("take", "take \(takeNumber): source=\(request.source.isAgent ? "agent(\(request.source.label ?? ""))" : "human")"
-                + " window=\(window.id) app=\(window.app)"
+                + " \(targetDescription)"
                 + " output=\(output.path) (from: \(request.output != nil ? "request" : "default"))"
-                + " background=\(background?.id ?? "<mesh gradient>") (from: \(backgroundOrigin))")
-            try recorder.prepare(windowID: window.id, output: output, background: background?.url)
+                + (target.isDisplay ? " background=none (screen take)" : " background=\(background?.id ?? "<mesh gradient>") (from: \(backgroundOrigin))"))
+            try recorder.prepare(target: target, output: output, background: background?.url)
         } catch {
             note("failed to start recorder: \(error.localizedDescription)")
             NSSound.beep()
@@ -324,7 +355,7 @@ final class SessionController {
     private func tickCountdown() {
         countdownRemaining -= 1
         if countdownRemaining > 0 {
-            pill.update(.countdown(remaining: countdownRemaining, appName: target?.app ?? ""))
+            pill.update(.countdown(remaining: countdownRemaining, appName: target?.label ?? ""))
         } else {
             stopTimer()
             beginRecording()

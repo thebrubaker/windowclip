@@ -52,7 +52,7 @@ func usage() -> Never {
       --debug-label <name>       who the attribution credits (default Claude)
 
     End-to-end (drives the real session, then quits):
-      --debug-record <id|pattern>   window to record (CGWindowID or app/title text)
+      --debug-record <target>       window (CGWindowID or app/title text), or display:<id|main>
       --debug-record-seconds <s>    how long to record (default 5)
       --debug-record-output <path>  where to write it (default: Desktop)
     """
@@ -164,7 +164,7 @@ while i < argv.count {
     case "--debug-record":
         i += 1
         guard i < argv.count else {
-            FileHandle.standardError.write(Data("--debug-record needs a window id or pattern\n".utf8))
+            FileHandle.standardError.write(Data("--debug-record needs a window id or pattern, or display:<id|main>\n".utf8))
             exit(64)
         }
         options.debugRecord = argv[i]
