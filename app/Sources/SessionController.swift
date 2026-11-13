@@ -113,7 +113,7 @@ final class SessionController {
     private var startWaiter: ((SessionResult) -> Void)?
     private var stopWaiter: ((SessionResult) -> Void)?
 
-    private let fullScreenClaimsEscape = true
+    private let fullScreenClaimsEscape = false
 
     /// Mockup's 3·2·1.
     private let countdownSeconds = 3
@@ -306,11 +306,13 @@ final class SessionController {
         // Esc becomes ours for exactly as long as the pill is up — for agent
         // sessions just as much as human ones. The countdown IS the user's veto
         // window, so it has to run identically no matter who asked.
-        if !target.isDisplay || fullScreenClaimsEscape {
+        let claimsEscape = !target.isDisplay || fullScreenClaimsEscape
+        if claimsEscape {
             HotkeyManager.shared.register(.escape) { [weak self] in self?.escape() }
         }
 
         pill.source = source
+        pill.showsEscapeHint = claimsEscape
         pill.show(.countdown(remaining: countdownRemaining, appName: target.label))
         startTimer(interval: 1) { [weak self] in self?.tickCountdown() }
 

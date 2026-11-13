@@ -41,6 +41,7 @@ final class PillController {
 
     /// Set before `show` — decides whether the pill wears its agent treatment.
     var source: SessionSource = .human
+    var showsEscapeHint = true
 
     /// Invalidates in-flight fades. Without it, a fade that gets cancelled
     /// mid-flight still runs its completion handler and hides the pill.
@@ -134,6 +135,7 @@ final class PillController {
         PillView(
             state: state,
             source: source,
+            showsEscapeHint: showsEscapeHint,
             showMidline: showMidline,
             freezeAnimation: freezeAnimation,
             forceHover: forceHover,
