@@ -179,6 +179,17 @@ you've since moved or thrown away stays listed, greyed and marked *— missing*,
 rather than silently vanishing or beeping at you. The history lives in
 `~/Library/Application Support/Windowclip/recents.json` and survives relaunch.
 
+**The log** is `~/Library/Logs/Windowclip/windowclip.log` (**Reveal Log** in the
+menu, or `windowclip log`). Each take gets a line naming who started it and
+where its output path and background came from (`request`, `saved` or
+`default`), then its stop reason, and its measured length and size at save.
+Control requests and replies, and the recorder's own stderr, land there too.
+It rotates at 2 MB and is mirrored to the unified log under the bundle id.
+
+A take is written beside its output as a hidden `.<name>.partial-<pid>.mp4` and
+moved into place only once it is finished, so a cancelled or failed take never
+touches a file that was already at that path.
+
 **The flow:**
 
 | Step | What you see |
@@ -373,9 +384,10 @@ echo '{"command":"escape"}' | nc -U "$SOCK"
   windowclip cancel           abort and delete the partial file
   windowclip status           what the app is doing, as JSON
   windowclip list-windows     on-screen windows as JSON
+  windowclip log [-n N] [-f]  the app's log, last N lines (-f follows)
 
   -t, --duration <s>    seconds, or 0 for open-ended (5min cap either way)
-  -o, --output <path>   final MP4 path (default ./out.mp4)
+  -o, --output <path>   final MP4 path (default ~/Desktop/recording-<time>.mp4)
   -w, --window <pat>    target window pattern (case-insensitive substring)
       --window-id <N>   target specific CGWindowID (`windowclip list-windows`)
       --label <name>    who the pill credits (default Claude)
