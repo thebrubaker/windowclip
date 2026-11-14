@@ -30,6 +30,7 @@ import Foundation
     hotkeyTake(s, w)
     check("second hotkey take output", Recorder.prepares.last!.output == Recorder.defaultPath, Recorder.prepares.last!.output)
     screenTakeThenHotkeyTake(s, pill, w, scratch: scratch)
+    devCommandCases(s, w)
     for (i, p) in Recorder.prepares.enumerated() { print("      prepare[\(i)] output=\(p.output) bg=\(p.background)") }
     dumpLog()
 }

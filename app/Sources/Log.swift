@@ -1,13 +1,13 @@
 import Foundation
 import os
 
-/// `~/Library/Logs/Windowclip/windowclip.log`, rotated at `maxBytes` with
+/// `~/Library/Logs/<name>/<slug>.log`, rotated at `maxBytes` with
 /// `keep` old files, and mirrored to the unified log under the bundle id.
 enum Log {
     nonisolated(unsafe) static var directory = AppSupport.logsDirectory
-    static var fileURL: URL { directory.appendingPathComponent("\(AppSupport.name.lowercased()).log") }
+    static var fileURL: URL { directory.appendingPathComponent("\(AppSupport.logFileStem).log") }
 
-    private static let subsystem = Bundle.main.bundleIdentifier ?? "io.digitalpine.windowclip"
+    private static let subsystem = AppIdentity.current.bundleId
     private static let queue = DispatchQueue(label: "windowclip.log")
     private static let maxBytes: UInt64 = 2_000_000
     private static let keep = 3
@@ -50,7 +50,7 @@ enum Log {
     }
 
     private static func rotated(_ n: Int) -> URL {
-        directory.appendingPathComponent("\(AppSupport.name.lowercased()).\(n).log")
+        directory.appendingPathComponent("\(AppSupport.logFileStem).\(n).log")
     }
 
     private static func rotate() {

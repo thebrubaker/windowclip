@@ -128,6 +128,7 @@ final class Recorder {
         env["RECORDER_EXCLUDE_PID"] = String(ProcessInfo.processInfo.processIdentifier)
         // Hold the take until SIGUSR1, and report lifecycle on stdout.
         env["RECORDER_HANDSHAKE"] = "1"
+        if !AppIdentity.current.recordsMicrophone { env["RECORDER_NO_AUDIO"] = "1" }
         task.environment = env
 
         let lifecycle = Pipe()

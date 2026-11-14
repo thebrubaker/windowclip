@@ -1,0 +1,16 @@
+{
+  "prod": {
+    "bundleId": "io.digitalpine.windowclip",
+    "name": "Windowclip",
+    "executable": "Windowclip",
+    "slug": "windowclip",
+    "statusTitle": ""
+  },
+  "dev": {
+    "bundleId": "io.digitalpine.windowclip.dev",
+    "name": "Windowclip Dev",
+    "executable": "WindowclipDev",
+    "slug": "windowclip-dev",
+    "statusTitle": "DEV"
+  }
+}

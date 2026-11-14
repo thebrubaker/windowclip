@@ -1,5 +1,7 @@
 #!/bin/bash
-# Build the windowclip hotkey recorder into an unsigned .app bundle.
+# Build the app bundle:  app/build.sh [--dev] [--arch arm64|x86_64]
+#   --dev   the test identity from identity.json: its own bundle id, name,
+#           folders and socket, no hotkeys, no microphone
 #
 # A bundle (rather than a bare binary) is what gives the app a stable TCC identity
 # for Screen Recording / Microphone — a raw swiftc binary would inherit the
@@ -11,7 +13,26 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
-APP="$HERE/build/Windowclip.app"
+KIND=prod
+ARCH=arm64
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dev) KIND=dev ;;
+    --arch) shift; ARCH="${1:-}" ;;
+    *) echo "usage: app/build.sh [--dev] [--arch arm64|x86_64]" >&2; exit 64 ;;
+  esac
+  shift
+done
+case "$ARCH" in arm64|x86_64) ;; *) echo "build.sh: --arch takes arm64 or x86_64" >&2; exit 64 ;; esac
+IDENTITY="$HERE/identity.sh"
+NAME="$("$IDENTITY" get "$KIND" name)"
+EXECUTABLE="$("$IDENTITY" get "$KIND" executable)"
+SHA="$(git -C "$REPO" rev-parse --short HEAD)"
+[[ -z "$(git -C "$REPO" status --porcelain -- app cmd)" ]] || SHA="$SHA-dirty"
+APP="$HERE/build/$NAME.app"
+GEN="$(mktemp -d)"
+trap 'rm -rf "$GEN"' EXIT
+"$IDENTITY" swift > "$GEN/IdentityTable.swift"
 
 # Developer ID, not ad-hoc. TCC keys a grant to the code-signing identity, so an
 # ad-hoc signature (whose identity changes every build) makes macOS treat each
@@ -21,7 +42,7 @@ SIGN_ID="${WINDOWCLIP_SIGN_ID:-Developer ID Application: Joel Brubaker (UQ27DB7N
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$HERE/Resources/Info.plist" "$APP/Contents/Info.plist"
+"$IDENTITY" plist "$KIND" "$HERE/Resources/Info.plist" "$APP/Contents/Info.plist" "$SHA"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 # --- Deployment target ----------------------------------------------------
@@ -40,9 +61,9 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 # lives here. Keep the two in sync; `otool -l <bin> | grep -A4 LC_BUILD_VERSION`
 # is how you check what actually got baked in.
 swiftc -O \
-  -target arm64-apple-macosx15.0 \
-  "$HERE"/Sources/*.swift \
-  -o "$APP/Contents/MacOS/Windowclip"
+  -target "$ARCH-apple-macosx15.0" \
+  "$HERE"/Sources/*.swift "$GEN/IdentityTable.swift" \
+  -o "$APP/Contents/MacOS/$EXECUTABLE"
 
 # --- App icon -------------------------------------------------------------
 # icon-master.png is the source art inset to the macOS icon grid (824 of 1024,
@@ -63,7 +84,10 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 # The app carries its own recorder and background art so it can live in
 # /Applications and keep working — it must not reach back into a checkout that
 # may be moved or deleted. Falls back to the repo copies for dev builds.
-if [[ -x "$REPO/cmd/recorder/recorder" ]]; then
+# The tracked recorder is arm64; another arch compiles its own from source.
+if [[ $ARCH != arm64 ]]; then
+  swiftc -O -target "$ARCH-apple-macosx15.0" "$REPO"/cmd/recorder/*.swift -o "$APP/Contents/MacOS/recorder"
+elif [[ -x "$REPO/cmd/recorder/recorder" ]]; then
   cp "$REPO/cmd/recorder/recorder" "$APP/Contents/MacOS/recorder"
 fi
 if [[ -f "$REPO/assets/big-sur-graphic.jpg" ]]; then
