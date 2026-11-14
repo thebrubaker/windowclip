@@ -170,6 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             FileHandle.standardError.write(Data(
                 "windowclip: could not register ⌥⌘R — another app is probably holding it.\n".utf8
             ))
+            Log.write("app", "could not register ⌥⌘R — another app is probably holding it")
         }
 
         installStatusItem()
@@ -202,6 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             FileHandle.standardError.write(Data(
                 "windowclip: control socket unavailable: \(error.localizedDescription)\n".utf8
             ))
+            Log.write("control", "socket unavailable: \(error.localizedDescription)")
         }
     }
 
@@ -272,7 +274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Accessibility grant this app deliberately doesn't have), so the same
         // entry point is exposed directly rather than approximated.
         case "escape":
-            session.escape()
+            session.escape(via: "control escape")
             respond(["ok": true, "state": session.describe(session.phase)])
 
         default:
@@ -354,6 +356,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         permissions.isEnabled = true
         menu.addItem(permissions)
 
+        let revealLog = NSMenuItem(title: "Reveal Log", action: #selector(revealLog), keyEquivalent: "")
+        revealLog.target = self
+        revealLog.isEnabled = true
+        menu.addItem(revealLog)
+
         menu.addItem(.separator())
         menu.addItem(
             NSMenuItem(title: "Quit Windowclip", action: #selector(NSApp.terminate(_:)), keyEquivalent: "q")
@@ -432,6 +439,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let added = Backgrounds.shared.importFiles(panel.urls)
         if added.count == 1 { Backgrounds.shared.select(added[0]) }
         Backgrounds.shared.warmThumbnails()
+    }
+
+    @objc private func revealLog() {
+        Log.write("app", "log revealed from the menu")
+        Log.flush()
+        NSWorkspace.shared.activateFileViewerSelecting([Log.fileURL])
     }
 
     @objc private func showBackgroundsFolder() {
@@ -1111,4 +1124,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 func note(_ message: String) {
     print("[windowclip] \(message)")
     fflush(stdout)
+    Log.write("app", message)
 }

@@ -44,6 +44,16 @@ enum SessionSource: Equatable {
     }
 }
 
+/// Everything a caller may choose about one take. Assigned whole at every
+/// countdown, so nothing one session asked for can reach the next.
+struct SessionRequest {
+    var source: SessionSource = .human
+    var output: URL?
+    var background: Background?
+
+    static let human = SessionRequest()
+}
+
 /// What a control-surface caller learns about the session it asked for.
 struct SessionResult {
     var ok: Bool
@@ -67,6 +77,7 @@ final class SessionController {
     private(set) var phase: Phase = .idle {
         didSet {
             guard phase != oldValue else { return }
+            Log.write("session", "take \(takeNumber): \(describe(oldValue)) → \(describe(phase))")
             onPhaseChange?(phase)
         }
     }
@@ -91,11 +102,10 @@ final class SessionController {
     private var waitingForArm = false
     private var armTimeoutWork: DispatchWorkItem?
 
-    /// Who started the live session, and where they asked for the file.
-    private(set) var source: SessionSource = .human
-    private var requestedOutput: URL?
-    private var requestedBackground: Background?
+    private var request = SessionRequest.human
+    var source: SessionSource { request.source }
     private var activeBackground: Background?
+    private var takeNumber = 0
 
     /// Control-surface callers block on these. A `start` isn't answered until the
     /// countdown has actually elapsed, so the caller learns "recording" or
@@ -113,10 +123,10 @@ final class SessionController {
 
     init(pill: PillController) {
         self.pill = pill
-        self.pill.onStop = { [weak self] in self?.stop() }
+        self.pill.onStop = { [weak self] in self?.stop(reason: "pill") }
         self.pill.onReveal = { [weak self] url in self?.reveal(url) }
         self.pill.onHoverChanged = { [weak self] hovering in self?.savedHoverChanged(hovering) }
-        picker.onPick = { [weak self] window in self?.beginCountdown(for: window) }
+        picker.onPick = { [weak self] window in self?.beginCountdown(for: window, request: .human) }
         picker.onCancel = { [weak self] in self?.phase = .idle }
     }
 
@@ -131,9 +141,9 @@ final class SessionController {
             picker.close(cancelled: true)
             phase = .idle
         case .countdown:
-            cancelCountdown()
+            cancelCountdown(reason: "hotkey")
         case .recording:
-            stop()
+            stop(reason: "hotkey")
         case .saved:
             // Don't make the user wait out the confirmation to start the next take.
             dismissSaved()
@@ -142,10 +152,10 @@ final class SessionController {
     }
 
     /// Esc, while a pill is up.
-    func escape() {
+    func escape(via reason: String = "esc") {
         switch phase {
-        case .countdown: cancelCountdown()
-        case .recording: stop()
+        case .countdown: cancelCountdown(reason: reason)
+        case .recording: stop(reason: reason)
         default: break
         }
     }
@@ -174,11 +184,8 @@ final class SessionController {
             ))
             return
         }
-        self.source = source
-        self.requestedOutput = output
-        self.requestedBackground = background
         self.startWaiter = completion
-        beginCountdown(for: window)
+        beginCountdown(for: window, request: SessionRequest(source: source, output: output, background: background))
     }
 
     /// Stop from outside (control surface / debug harness / status menu).
@@ -190,11 +197,11 @@ final class SessionController {
         if phase == .countdown {
             // Stopping during the countdown is a cancel: nothing has been written.
             stopWaiter = completion
-            cancelCountdown()
+            cancelCountdown(reason: "control stop")
             return
         }
         stopWaiter = completion
-        stop()
+        stop(reason: "control stop")
     }
 
     /// Abort and leave nothing behind.
@@ -204,11 +211,11 @@ final class SessionController {
             return
         }
         stopWaiter = completion
+        Log.write("session", "take \(takeNumber): cancel requested (control cancel)")
         if phase == .recording {
-            // endSession's recorder.cancel() removes the partial file.
             endSession()
         } else {
-            cancelCountdown()
+            cancelCountdown(reason: "control cancel")
         }
     }
 
@@ -265,7 +272,9 @@ final class SessionController {
 
     // MARK: - Countdown
 
-    private func beginCountdown(for window: CapturableWindow) {
+    private func beginCountdown(for window: CapturableWindow, request: SessionRequest) {
+        self.request = request
+        takeNumber += 1
         target = window
         phase = .countdown
         countdownRemaining = countdownSeconds
@@ -288,7 +297,7 @@ final class SessionController {
     /// Spawn the recorder now and let it warm. It captures but discards frames
     /// until `go()`, so nothing of the countdown lands in the file.
     private func prepareRecorder(for window: CapturableWindow) {
-        let output = requestedOutput ?? Recorder.defaultOutputURL()
+        let output = request.output ?? Recorder.defaultOutputURL()
         preparedOutput = output
         recorder.onArmed = { [weak self] in self?.recorderArmed() }
         recorder.onExit = { [weak self] status in self?.recorderExited(status: status) }
@@ -296,8 +305,13 @@ final class SessionController {
             try FileManager.default.createDirectory(
                 at: output.deletingLastPathComponent(), withIntermediateDirectories: true
             )
-            let background = requestedBackground ?? Backgrounds.shared.current
+            let background = request.background ?? Backgrounds.shared.current
             activeBackground = background
+            let backgroundOrigin = request.background != nil ? "request" : (background?.isDefault ?? true) ? "default" : "saved"
+            Log.write("take", "take \(takeNumber): source=\(request.source.isAgent ? "agent(\(request.source.label ?? ""))" : "human")"
+                + " window=\(window.id) app=\(window.app)"
+                + " output=\(output.path) (from: \(request.output != nil ? "request" : "default"))"
+                + " background=\(background?.id ?? "<mesh gradient>") (from: \(backgroundOrigin))")
             try recorder.prepare(windowID: window.id, output: output, background: background?.url)
         } catch {
             note("failed to start recorder: \(error.localizedDescription)")
@@ -317,12 +331,9 @@ final class SessionController {
         }
     }
 
-    private func cancelCountdown() {
+    private func cancelCountdown(reason: String) {
+        Log.write("session", "take \(takeNumber): countdown cancelled (\(reason))")
         stopTimer()
-        // A recorder IS warming by now, but the gate never opened, so nothing
-        // was ever written to the take. endSession's recorder.cancel() kills it
-        // and removes the empty file — a cancelled countdown still leaves
-        // nothing behind.
         endSession()
     }
 
@@ -386,8 +397,9 @@ final class SessionController {
         pill.update(.recording(elapsed: recorder.elapsed))
     }
 
-    private func stop() {
+    private func stop(reason: String) {
         guard phase == .recording else { return }
+        Log.write("session", "take \(takeNumber): stop requested (\(reason)) at \(String(format: "%.2f", recorder.elapsed))s")
         stopTimer()
         // Hold the recording pill until the recorder has actually finalized —
         // flashing "Saved" before the file is written would be a lie.
@@ -412,12 +424,14 @@ final class SessionController {
             return endSession()
         }
 
+        let take = takeNumber
         phase = .saved
         // Save-time is the only place history is written: every session — hotkey,
         // CLI, agent — arrives here with a file that exists on disk, and a session
         // that never got here never made one.
         RecentRecordings.shared.record(output)
         HotkeyManager.shared.unregister(.escape)
+        clearRequest()
 
         // Ask the artifact how long it is. Reporting our own elapsed time is
         // what let a 1.8s recording announce itself as 5.2s.
@@ -428,6 +442,9 @@ final class SessionController {
                 note("could not read a duration from \(output.lastPathComponent) — reporting elapsed")
             }
             let duration = measured ?? elapsed
+            let bytes = (try? FileManager.default.attributesOfItem(atPath: output.path))?[.size] as? Int
+            Log.write("take", "take \(take): saved \(output.path) duration=\(String(format: "%.2f", duration))s"
+                + "\(measured == nil ? " (elapsed, not measured)" : "") size=\(bytes.map(String.init) ?? "?") bytes")
             self.pill.update(.saved(url: output, duration: duration))
             self.scheduleSavedDismiss()
             self.resolveStop(SessionResult(ok: true, state: "saved", output: output, duration: duration))
@@ -479,17 +496,19 @@ final class SessionController {
         recorder.cancel()
         HotkeyManager.shared.unregister(.escape)
         pill.hide()
-        target = nil
-        preparedOutput = nil
-        requestedOutput = nil
-        requestedBackground = nil
-        activeBackground = nil
-        source = .human
+        clearRequest()
         phase = .idle
         // Whoever asked for this session learns the user ended it. This is how a
         // caller finds out its recording was overridden rather than completed.
         resolveStart(SessionResult(ok: false, state: "idle", cancelled: true, error: "cancelled"))
         resolveStop(SessionResult(ok: true, state: "idle", cancelled: true))
+    }
+
+    private func clearRequest() {
+        request = .human
+        target = nil
+        preparedOutput = nil
+        activeBackground = nil
     }
 
     /// Called on app termination — never leave a recorder orphaned.

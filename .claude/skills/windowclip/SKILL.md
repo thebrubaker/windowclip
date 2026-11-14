@@ -138,6 +138,7 @@ filename in it is clickable — it reveals the recording in Finder.
 bun run src/cli.ts status     # what the app is doing, as JSON
 bun run src/cli.ts cancel     # abort and delete the partial file — nothing kept
 bun run src/cli.ts stop       # stop and keep the file
+bun run src/cli.ts log        # the app's log: each take's source, output, background, stop reason
 ```
 
 `cancel` is the right verb when the take was bad and Joel wants it gone; `stop`
@@ -181,6 +182,7 @@ app-routed path exists to stop worrying about.
 | `Windowclip isn't installed at /Applications/Windowclip.app` | Build + install it: `pnpm run build:app && ditto "app/build/Windowclip.app" "/Applications/Windowclip.app"` |
 | `Windowclip did not come up within 15s` | Launch it by hand and check stderr; if `⌥⌘R` is taken by another app it says so |
 | exit 3 busy, but nothing is on screen | `status` shows the real state; `cancel` clears a stuck session |
+| A take landed somewhere odd, or on the wrong background | `bun run src/cli.ts log` — each take's line says where its output and background came from |
 | Blank/black video, or no audio (headless only) | Screen Recording / Microphone missing on the *terminal*. The app-routed path doesn't have this problem |
 
 ## What this skill does NOT cover

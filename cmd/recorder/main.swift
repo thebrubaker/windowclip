@@ -19,6 +19,13 @@
 //   RECORDER_NO_AUDIO=1      — skip mic capture
 //   RECORDER_SOLID_RED=1     — probe mode: solid red bg, no shadow/padding,
 //                              used to verify alpha-through-compose end-to-end
+//   SIGUSR2                  — discard: stop and delete the take instead of
+//                              saving it; exits 2.
+//
+// The take is written to a hidden `.<name>.partial-<pid>.mp4` beside the
+// output and renamed onto `outputPath` only once it is complete, so nothing
+// at `outputPath` is touched until there is a finished file to put there.
+//
 //   RECORDER_HANDSHAKE=1     — controller mode (DIG-807). Capture starts as
 //                              usual, but frames are DISCARDED until SIGUSR1
 //                              arrives, and lifecycle lines are written to
@@ -54,6 +61,18 @@ guard args.count >= 4,
     exit(64)
 }
 let outputPath = args[3]
+let partialURL: URL = {
+    let output = URL(fileURLWithPath: outputPath)
+    let ext = output.pathExtension.isEmpty ? "mp4" : output.pathExtension
+    return output.deletingLastPathComponent()
+        .appendingPathComponent(".\(output.deletingPathExtension().lastPathComponent).partial-\(getpid()).\(ext)")
+}()
+
+func removePartial() {
+    if FileManager.default.fileExists(atPath: partialURL.path) {
+        try? FileManager.default.removeItem(at: partialURL)
+    }
+}
 let windowID = CGWindowID(windowIDNum)
 let captureAudio = ProcessInfo.processInfo.environment["RECORDER_NO_AUDIO"] != "1"
 let probeSolidRed = ProcessInfo.processInfo.environment["RECORDER_SOLID_RED"] == "1"
@@ -385,7 +404,6 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptureAudio
     private var sessionStartSeconds: Double = 0
 
     init(outputURL: URL, outputW: Int, outputH: Int, withAudio: Bool, composer: Composer) throws {
-        try? FileManager.default.removeItem(at: outputURL)
         self.writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         self.composer = composer
 
@@ -591,8 +609,7 @@ func run() async throws {
     }
     let composer = try Composer(outputW: outW, outputH: outH, solidProbe: probeSolidRed, background: backgroundImage)
 
-    let outputURL = URL(fileURLWithPath: outputPath)
-    let recorder = try Recorder(outputURL: outputURL, outputW: outW, outputH: outH, withAudio: captureAudio, composer: composer)
+    let recorder = try Recorder(outputURL: partialURL, outputW: outW, outputH: outH, withAudio: captureAudio, composer: composer)
 
     let stream = SCStream(filter: filter, configuration: config, delegate: recorder)
     let videoQueue = DispatchQueue(label: "windowclip.recorder.video", qos: .userInteractive)
@@ -615,10 +632,12 @@ func run() async throws {
     let stopSemaphore = DispatchSemaphore(value: 0)
     let stopLock = NSLock()
     var stopFired = false
+    var discard = false
     let signalStop: (String) -> Void = { reason in
         stopLock.lock(); defer { stopLock.unlock() }
         if stopFired { return }
         stopFired = true
+        if reason == "SIGUSR2" { discard = true }
         // Close the take FIRST, before the (slow) orderly teardown, so the file
         // ends where the caller asked rather than wherever stopCapture landed.
         recorder.gate.closeNow()
@@ -650,6 +669,11 @@ func run() async throws {
         }
     }
     sigusr1Source.resume()
+
+    signal(SIGUSR2, SIG_IGN)
+    let sigusr2Source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .global())
+    sigusr2Source.setEventHandler { signalStop("SIGUSR2") }
+    sigusr2Source.resume()
 
     // Duration is measured from the first frame actually written, NOT from
     // process start (DIG-807). Start-up here costs 0.6s on a warm machine and
@@ -709,10 +733,18 @@ func run() async throws {
     sigtermSource.cancel()
     sigintSource.cancel()
     sigusr1Source.cancel()
+    sigusr2Source.cancel()
 
     FileHandle.standardError.write(Data("recorder: stopping stream...\n".utf8))
     try await stream.stopCapture()
     audioSession?.stopRunning()
+
+    if stopLock.withLock({ discard }) {
+        if recorder.writer.status == .writing { recorder.writer.cancelWriting() }
+        removePartial()
+        FileHandle.standardError.write(Data("recorder: discarded the take, \(outputPath) untouched\n".utf8))
+        exit(2)
+    }
 
     recorder.videoInput.markAsFinished()
     recorder.audioInput?.markAsFinished()
@@ -723,7 +755,13 @@ func run() async throws {
             NSLocalizedDescriptionKey: "writer status \(recorder.writer.status.rawValue): \(recorder.writer.error?.localizedDescription ?? "?")",
         ])
     }
-    FileHandle.standardError.write(Data("recorder: wrote \(outputPath)\n".utf8))
+    let replacing = FileManager.default.fileExists(atPath: outputPath)
+    guard rename(partialURL.path, outputPath) == 0 else {
+        throw NSError(domain: "recorder", code: 4, userInfo: [
+            NSLocalizedDescriptionKey: "could not move the take into place: \(String(cString: strerror(errno)))",
+        ])
+    }
+    FileHandle.standardError.write(Data("recorder: wrote \(outputPath)\(replacing ? " (replaced the file already there)" : "")\n".utf8))
 }
 
 // MARK: - Entry
@@ -736,6 +774,7 @@ Task {
         try await run()
         exit(0)
     } catch {
+        removePartial()
         FileHandle.standardError.write(Data("recorder error: \(error)\n".utf8))
         exit(1)
     }

@@ -143,11 +143,14 @@ final class ControlServer {
 
     private func dispatch(raw: Data, client: Int32) {
         var responded = false
+        let request = String(decoding: raw, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        Log.write("control", "← \(request)")
         let respond: ([String: Any]) -> Void = { payload in
             // A handler that fires twice (e.g. a phase waiter plus a timeout)
             // would write into a closed fd. Only the first answer counts.
             guard !responded else { return }
             responded = true
+            Log.write("control", "→ \(Self.compact(payload))")
             Self.write(payload, to: client)
             close(client)
         }
@@ -167,6 +170,13 @@ final class ControlServer {
             return
         }
         handler(ControlRequest(command: command, body: body), respond)
+    }
+
+    private static func compact(_ payload: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .withoutEscapingSlashes]) else {
+            return "\(payload)"
+        }
+        return String(decoding: data, as: UTF8.self)
     }
 
     private static func write(_ payload: [String: Any], to fd: Int32) {

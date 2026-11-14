@@ -89,7 +89,14 @@ final class Recorder {
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Desktop")
-        return desktop.appendingPathComponent("recording-\(formatter.string(from: now)).mp4")
+        let stem = "recording-\(formatter.string(from: now))"
+        var candidate = desktop.appendingPathComponent("\(stem).mp4")
+        var n = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = desktop.appendingPathComponent("\(stem)-\(n).mp4")
+            n += 1
+        }
+        return candidate
     }
 
     // MARK: - Lifecycle
@@ -120,6 +127,8 @@ final class Recorder {
 
         let lifecycle = Pipe()
         task.standardOutput = lifecycle
+        let diagnostics = Pipe()
+        task.standardError = diagnostics
 
         task.terminationHandler = { [weak self] proc in
             let status = proc.terminationStatus
@@ -138,6 +147,7 @@ final class Recorder {
         startedAt = nil
         isArmed = false
         readLifecycle(from: lifecycle)
+        forwardDiagnostics(from: diagnostics, pid: task.processIdentifier)
         note("recorder warming (pid \(task.processIdentifier)) → \(output.path)")
     }
 
@@ -168,6 +178,25 @@ final class Recorder {
                 guard line.hasPrefix("windowclip:") else { continue }
                 let event = String(line.dropFirst("windowclip:".count))
                 Task { @MainActor [weak self] in self?.handleLifecycle(event) }
+            }
+        }
+    }
+
+    private func forwardDiagnostics(from pipe: Pipe, pid: Int32) {
+        var buffer = Data()
+        pipe.fileHandleForReading.readabilityHandler = { fh in
+            let chunk = fh.availableData
+            if chunk.isEmpty {
+                fh.readabilityHandler = nil
+                if !buffer.isEmpty { Log.write("recorder", "[\(pid)] \(String(decoding: buffer, as: UTF8.self))") }
+                try? fh.close()
+                return
+            }
+            buffer.append(chunk)
+            while let newline = buffer.firstIndex(of: 0x0A) {
+                let line = String(decoding: buffer[buffer.startIndex..<newline], as: UTF8.self)
+                buffer.removeSubrange(buffer.startIndex...newline)
+                Log.write("recorder", "[\(pid)] \(line)")
             }
         }
     }
@@ -208,22 +237,19 @@ final class Recorder {
         process.terminate()
     }
 
-    /// Abort: stop the recorder AND remove the partial file. A cancelled take
-    /// must leave nothing behind, or the Desktop fills with junk that looks like
-    /// real recordings.
+    /// Abort the take. SIGUSR2 tells the recorder to discard its own partial
+    /// file; the app never deletes anything at `outputURL`, which may hold a
+    /// finished recording from an earlier session.
     func cancel() {
         onExit = { _ in }
         onArmed = {}
         isArmed = false
         if let process, process.isRunning {
-            process.terminate()
+            kill(process.processIdentifier, SIGUSR2)
             process.waitUntilExit()
+            note("cancelled recorder \(process.processIdentifier) — take discarded")
         }
         self.process = nil
-        if let outputURL {
-            try? FileManager.default.removeItem(at: outputURL)
-            note("cancelled — removed \(outputURL.lastPathComponent)")
-        }
         outputURL = nil
         startedAt = nil
     }
