@@ -10,6 +10,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { connect } from "node:net";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -296,6 +297,9 @@ function parseArgs(argv: string[]): Args {
   if (argv[0] === "log") {
     showLog(argv.slice(1));
   }
+  if (argv[0] === "doctor") {
+    runDoctor(argv.slice(1));
+  }
   if (argv[0] === "paths") {
     console.log(JSON.stringify({
       identity: IDENTITY_KIND, bundleId: IDENTITY.bundleId, app: APP_PATH,
@@ -337,6 +341,8 @@ Usage:
                                     recordings use, as JSON
   windowclip log [-n N] [-f]        print the app's log (last N lines, default
                                     50; -f follows it)
+  windowclip doctor [--files]       what the app is and what its next take will
+                                    do, as JSON; reads only, starts nothing
   windowclip paths                  print the app, folder, socket and log this
                                     CLI talks to, as JSON
 
@@ -718,6 +724,117 @@ function defaultOutputPath(now = new Date()): string {
   let candidate = resolve(desktop, `recording-${stamp}.mp4`);
   for (let n = 2; existsSync(candidate); n++) candidate = resolve(desktop, `recording-${stamp}-${n}.mp4`);
   return candidate;
+}
+
+// ---------------------------------------------------------------------------
+// `windowclip doctor`: what the app is and what its next take will do. Runs the
+// app's own `--doctor` only when its Info.plist says it has one (AppDoctor);
+// otherwise, or with --files, reads the files and executes nothing of the app's.
+// Either way it writes nothing and never touches the socket.
+// ---------------------------------------------------------------------------
+
+function sh(cmd: string, args: string[]): { status: number; out: string; err: string } {
+  const r = Bun.spawnSync([cmd, ...args], { stdout: "pipe", stderr: "pipe" });
+  return { status: r.exitCode ?? -1, out: r.stdout.toString(), err: r.stderr.toString() };
+}
+
+function readJSON(path: string): unknown {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+function plistValue(plist: string, key: string): string | undefined {
+  const r = sh("/usr/bin/plutil", ["-extract", key, "raw", "-o", "-", plist]);
+  return r.status === 0 ? r.out.trim() : undefined;
+}
+
+function runDoctor(rest: string[]): never {
+  let files = false;
+  let root: string | undefined;
+  let app = APP_PATH;
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === "--files") files = true;
+    else if (rest[i] === "--root") root = resolve(rest[++i]);
+    else if (rest[i] === "--app") app = resolve(rest[++i]);
+    else {
+      console.error("usage: windowclip [--dev] doctor [--files] [--root <dir>] [--app <bundle>]");
+      process.exit(64);
+    }
+  }
+  const plist = resolve(app, "Contents/Info.plist");
+  const hasDoctor = existsSync(plist) && plistValue(plist, "AppDoctor") === "1";
+  if (hasDoctor && !files) {
+    const exe = resolve(app, "Contents/MacOS", plistValue(plist, "CFBundleExecutable") ?? IDENTITY.executable);
+    const r = Bun.spawnSync([exe, "--doctor", ...(root ? ["--doctor-root", root] : [])], { stdout: "inherit", stderr: "inherit" });
+    process.exit(r.exitCode ?? 1);
+  }
+  const why = files ? "--files" : existsSync(plist) ? "this build has no --doctor" : `no app at ${app}`;
+  console.log(JSON.stringify(doctorFromFiles(root, app, why), null, 2));
+  process.exit(0);
+}
+
+function doctorFromFiles(root: string | undefined, app: string, why: string): Record<string, unknown> {
+  const support = root ?? APP_SUPPORT;
+  const log = root ? resolve(root, "Logs", `${IDENTITY.slug}.log`) : LOG_FILE;
+  const report: Record<string, unknown> = {
+    doctor: 1, identity: IDENTITY_KIND, bundleId: IDENTITY.bundleId, support, log,
+    mode: "files", predicted: true, why,
+  };
+  const lines = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
+  report.logTail = lines.slice(-10);
+  const lastTake = lines.findLast((l) => l.includes("[session] take ") && l.includes(" → "));
+  if (lastTake) report.lastTake = lastTake;
+  report.phase = lastTake?.split(" → ").pop() ?? "not running";
+
+  const statePath = resolve(support, "state.json");
+  const state = readJSON(statePath) as { pid?: number; written?: string } | undefined;
+  if (state) {
+    const comm = state.pid ? sh("/bin/ps", ["-p", String(state.pid), "-o", "comm="]).out.trim() : "";
+    const name = basename(comm);
+    report.state = {
+      file: statePath, found: true, written: state.written ?? "?",
+      stale: name !== IDENTITY.executable,
+      ...(name !== IDENTITY.executable ? { reason: comm ? `pid ${state.pid} is ${name}, not ${IDENTITY.executable}` : `pid ${state.pid} is not running` } : {}),
+    };
+  } else {
+    report.state = { file: statePath, found: false };
+  }
+
+  const selected = (readJSON(resolve(support, "background.json")) as { selected?: string } | undefined)?.selected;
+  const next: Record<string, unknown> = { output: resolve(homedir(), "Desktop", "recording-<time>.mp4"), outputFrom: "default" };
+  if (selected && existsSync(resolve(support, "Backgrounds", selected))) Object.assign(next, { background: selected, backgroundFrom: "saved" });
+  else Object.assign(next, { background: "default", backgroundFrom: "default", ...(selected ? { note: `saved choice ${selected} is missing from Backgrounds` } : {}) });
+  report.next = next;
+
+  const recents = (readJSON(resolve(support, "recents.json")) as { path: string }[] | undefined) ?? [];
+  report.recents = { count: recents.length, ...(recents[0] ? { newest: recents[0].path, newestExists: existsSync(recents[0].path) } : {}) };
+  report.background = readJSON(resolve(support, "background.json")) ?? null;
+
+  const recorder = resolve(app, "Contents/MacOS/recorder");
+  if (existsSync(recorder)) {
+    const minos = sh("/usr/bin/otool", ["-l", recorder]).out.match(/minos (\S+)/g)?.map((m) => m.slice(6)) ?? [];
+    const team = sh("/usr/bin/codesign", ["-dv", recorder]).err.match(/^TeamIdentifier=(.*)$/m)?.[1];
+    report.recorder = {
+      path: recorder, found: true,
+      archs: sh("/usr/bin/lipo", ["-archs", recorder]).out.trim() || "unavailable",
+      minos: minos.length ? minos : "unavailable",
+      team: team ?? "unsigned or unreadable",
+      sha256: createHash("sha256").update(readFileSync(recorder)).digest("hex"),
+    };
+  } else {
+    report.recorder = { path: recorder, found: false };
+  }
+  const tcc = sh("/usr/bin/sqlite3", ["-readonly", "-separator", "=", "/Library/Application Support/com.apple.TCC/TCC.db",
+    `select service, auth_value from access where client = '${IDENTITY.bundleId}'`]);
+  report.tcc = tcc.status === 0 ? tcc.out.split("\n").filter(Boolean) : "unreadable (needs Full Disk Access)";
+  const st = report.state as { reason?: string };
+  report.summary = `${IDENTITY_KIND} is ${report.phase}; next take → ${next.output} (from: ${next.outputFrom}), ` +
+    `background ${next.background} (from: ${next.backgroundFrom}); predicted from files (${why})` +
+    (st.reason ? `; stale state.json: ${st.reason}` : "");
+  return report;
 }
 
 function showLog(rest: string[]): never {

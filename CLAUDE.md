@@ -64,6 +64,7 @@ About 80 s on the m3, all of it in fresh `/tmp` directories. There is no app, no
 - **session** (`test/session-probe/run.sh`, about 65 s): compiles the shipping `SessionController.swift` and `Recorder.swift` against stubs and a stand-in recorder script.
 - **recorder** (`test/recorder-suite/run.sh`, about 16 s): builds `cmd/recorder/*.swift` and drives the real binary, muted, on synthetic frames (`RECORDER_SOURCE=synthetic[:WxH]`). It covers size math, partial→rename, replacing a file, SIGUSR2 discard, duration, handshake and gate. Frame n carries n as a barcode; display takes reach the file unscaled, so the suite reads the first frame's number back.
 - **identity** (`test/identity-suite/run.sh`, about 2 s): the bundle id → identity → paths mapping (prod, dev, none, unknown and near-misses), a raw binary and dev/unknown bundles reporting their real paths, `ControlServer` refusing a live socket and clearing a stale one, the plists `identity.sh` writes, and the CLI's `--dev`. The prod id is checked through the mapping only; nothing under Joel's bundle id is run.
+- **doctor** (`test/doctor-suite/run.sh`, about 10 s): `--doctor` on fixtures (a dead pid and a wrong process flagged stale, a live state read, the recorder's arch, minos and sha, nothing in the fixture changed, with a control that catches one appended line), and `windowclip doctor` running `--doctor` only for a bundle whose plist has `AppDoctor`.
 - **clickzoom** only with `test/run.sh --clickzoom` (or `bun run test:clickzoom`). It renders video through Remotion, so run it on stella or legion-tower, not the m3.
 
 Each part takes a tree argument, so a comparison can run the same suite on another commit. Run the suite before and after any `SessionController`, `Recorder` or `cmd/recorder` change.
@@ -96,6 +97,8 @@ That reads `~/Library/Logs/Windowclip/windowclip.log`; `--dev` reads the dev cop
 ```sh
 /usr/bin/log show --style compact --last 30m --predicate 'process == "Windowclip" OR process == "recorder"' | tail -40
 ```
+
+**What will the next recording do?** `bun run src/cli.ts [--dev] doctor` prints JSON: phase, the request in flight and the next take's output and background with their `from:`, recents, the bundled recorder (arch, minos, team, sha256) and TCC rows. A build whose Info.plist has `AppDoctor` answers through its own `--doctor`, which reads `state.json` (published by the app at every phase change) and exits before the app starts. An older build is never executed: the CLI reads the files and labels the result `predicted`. `--files` forces that. Both write nothing and never touch the socket; on Joel's machine they are read-only by rule (PLAN.md ruling 2).
 
 What the installed app is, read-only:
 
