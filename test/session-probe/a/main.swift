@@ -15,7 +15,7 @@ import Foundation
     let w = CapturableWindow(id: 5583, app: "Onlook")
     let agentBG = Background(id: "Runtime/2D-bonsai-terrace-sun.png", url: URL(fileURLWithPath: "/bg/2D.png"))
 
-    s.start(window: w, source: .agent(label: "Claude"), output: agentOut, background: agentBG) { _ in }
+    startWindowTake(s, w, source: .agent(label: "Claude"), output: agentOut, background: agentBG) { _ in }
     pump(3.4); s.requestStop { _ in }; pump(4.7)
     let status = s.statusPayload()
     check("status after an agent take", (status["source"] as? String) == "human",
@@ -29,6 +29,7 @@ import Foundation
 
     hotkeyTake(s, w)
     check("second hotkey take output", Recorder.prepares.last!.output == Recorder.defaultPath, Recorder.prepares.last!.output)
+    screenTakeThenHotkeyTake(s, pill, w, scratch: scratch)
     for (i, p) in Recorder.prepares.enumerated() { print("      prepare[\(i)] output=\(p.output) bg=\(p.background)") }
     dumpLog()
 }
