@@ -19,5 +19,7 @@ import AppKit
     func go() {}
     func stop() { isRunning = false; let cb = onExit; Task { @MainActor in cb(0) } }
     func cancel() { onExit = { _ in }; isRunning = false; outputURL = nil }
+    func finishBeforeExit(timeout: TimeInterval) -> Int32? { onExit = { _ in }; isRunning = false; return 0 }
+    static func describeExit(_ status: Int32) -> String { "exited \(status)" }
     static func measuredDuration(of url: URL) async -> TimeInterval? { 3 }
 }

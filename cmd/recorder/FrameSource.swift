@@ -5,6 +5,7 @@ import CoreMedia
 import CoreVideo
 import Foundation
 import ScreenCaptureKit
+import VideoToolbox
 
 // MARK: - Capture flow
 
@@ -167,7 +168,7 @@ func windowCaptureSetup(windowID: CGWindowID, content: SCShareableContent) async
         ])
     }
 
-    FileHandle.standardError.write(Data("recorder: target \(windowID) — \(target.owningApplication?.applicationName ?? "?") — \(target.title ?? "")\n".utf8))
+    writeDiagnostic(Data("recorder: target \(windowID) — \(target.owningApplication?.applicationName ?? "?") — \(target.title ?? "")\n".utf8))
 
     let backingScale = NSScreen.main?.backingScaleFactor ?? 2.0
     let pxW = Int(target.frame.width * backingScale)
@@ -206,11 +207,11 @@ func windowComposer(outW: Int, outH: Int) async throws -> Composer {
         backgroundImage = CIImage(color: CIColor(red: 1, green: 0, blue: 0))
             .cropped(to: CGRect(x: 0, y: 0, width: outW, height: outH))
     } else if let bgPath = backgroundImagePath, let loaded = loadBackgroundImage(path: bgPath, width: outW, height: outH) {
-        FileHandle.standardError.write(Data("recorder: bg image \(bgPath)\n".utf8))
+        writeDiagnostic(Data("recorder: bg image \(bgPath)\n".utf8))
         backgroundImage = loaded
     } else {
         if backgroundImagePath != nil {
-            FileHandle.standardError.write(Data("recorder: bg image failed to load, using mesh gradient\n".utf8))
+            writeDiagnostic(Data("recorder: bg image failed to load, using mesh gradient\n".utf8))
         }
         backgroundImage = await MainActor.run {
             makeMeshGradientBackground(width: outW, height: outH)
@@ -220,7 +221,7 @@ func windowComposer(outW: Int, outH: Int) async throws -> Composer {
 }
 
 func syntheticWindowSetup(width: Int, height: Int) async throws -> CaptureSetup {
-    FileHandle.standardError.write(Data("recorder: target synthetic window \(width)x\(height) px\n".utf8))
+    writeDiagnostic(Data("recorder: target synthetic window \(width)x\(height) px\n".utf8))
     let outW = probeSolidRed ? width : OUTPUT_W
     let outH = probeSolidRed ? height : OUTPUT_H
     let composer = try await windowComposer(outW: outW, outH: outH)
@@ -229,8 +230,8 @@ func syntheticWindowSetup(width: Int, height: Int) async throws -> CaptureSetup 
 }
 
 func syntheticDisplaySetup(width: Int, height: Int) throws -> CaptureSetup {
-    let (outW, outH) = displayOutputSize(pixelWidth: width, pixelHeight: height)
-    FileHandle.standardError.write(Data("recorder: target synthetic display \(width)x\(height) px\n".utf8))
+    let (outW, outH) = displayOutputSize(pixelWidth: width, pixelHeight: height, hardwareAccepts: hardwareEncoderAccepts)
+    writeDiagnostic(Data("recorder: target synthetic display \(width)x\(height) px\n".utf8))
     let composer = try displayComposer(outW: outW, outH: outH)
     return CaptureSetup(makeSource: { try SyntheticSource(width: outW, height: outH, recorder: $0, queue: $1) },
                         captureW: outW, captureH: outH, outW: outW, outH: outH, bitrate: displayBitrate(width: outW, height: outH), composer: composer)
@@ -245,14 +246,14 @@ func displayCaptureSetup(displayID: CGDirectDisplayID, content: SCShareableConte
     }
     let excluded = content.applications.filter { $0.processID == excludedPID }
     if let excludedPID, excluded.isEmpty {
-        FileHandle.standardError.write(Data("recorder: no running application with pid \(excludedPID) to exclude\n".utf8))
+        writeDiagnostic(Data("recorder: no running application with pid \(excludedPID) to exclude\n".utf8))
     }
     let filter = SCContentFilter(display: display, excludingApplications: excluded, exceptingWindows: [])
 
     let pixelW = Int((filter.contentRect.width * CGFloat(filter.pointPixelScale)).rounded())
     let pixelH = Int((filter.contentRect.height * CGFloat(filter.pointPixelScale)).rounded())
-    let (outW, outH) = displayOutputSize(pixelWidth: pixelW, pixelHeight: pixelH)
-    FileHandle.standardError.write(Data("recorder: target display \(displayID) — \(pixelW)x\(pixelH) px\(excluded.isEmpty ? "" : ", excluding pid \(excluded[0].processID) \(excluded[0].applicationName)")\n".utf8))
+    let (outW, outH) = displayOutputSize(pixelWidth: pixelW, pixelHeight: pixelH, hardwareAccepts: hardwareEncoderAccepts)
+    writeDiagnostic(Data("recorder: target display \(displayID) — \(pixelW)x\(pixelH) px\(excluded.isEmpty ? "" : ", excluding pid \(excluded[0].processID) \(excluded[0].applicationName)")\n".utf8))
 
     let config = SCStreamConfiguration()
     config.width = outW
@@ -272,4 +273,22 @@ func displayComposer(outW: Int, outH: Int) throws -> Composer {
     let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0))
         .cropped(to: CGRect(x: 0, y: 0, width: outW, height: outH))
     return try Composer(outputW: outW, outputH: outH, layout: .passthrough, background: black)
+}
+
+func hardwareEncoderAccepts(width: Int, height: Int) -> Bool {
+    var session: VTCompressionSession?
+    let created = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height), codecType: kCMVideoCodecType_H264,
+                                             encoderSpecification: nil, imageBufferAttributes: nil, compressedDataAllocator: nil,
+                                             outputCallback: nil, refcon: nil, compressionSessionOut: &session)
+    guard created == noErr, let session else { return false }
+    defer { VTCompressionSessionInvalidate(session) }
+    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
+    guard VTCompressionSessionPrepareToEncodeFrames(session) == noErr else { return false }
+    var hardware: CFTypeRef?
+    VTSessionCopyProperty(session, key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder, allocator: nil, valueOut: &hardware)
+    let accepted = (hardware as? Bool) == true
+    if !accepted {
+        writeDiagnostic(Data("recorder: no hardware H.264 encoder for \(width)x\(height), stepping down to fit \(DISPLAY_FALLBACK_W)x\(DISPLAY_FALLBACK_H)\n".utf8))
+    }
+    return accepted
 }

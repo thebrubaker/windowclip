@@ -17,11 +17,21 @@ func removePartialFile(at partial: URL) {
 func discardTake(recorder: Recorder, partial: URL, output: String) -> Never {
     if recorder.writer.status == .writing { recorder.writer.cancelWriting() }
     removePartialFile(at: partial)
-    FileHandle.standardError.write(Data("recorder: discarded the take, \(output) untouched\n".utf8))
+    writeDiagnostic(Data("recorder: discarded the take, \(output) untouched\n".utf8))
     exit(2)
 }
 
 func finishTake(recorder: Recorder, partial: URL, output outputPath: String) async throws {
+    let (started, failed) = recorder.writerLock.withLock { (recorder.sessionStarted, recorder.writerFailed) }
+    if !started {
+        if recorder.writer.status == .writing { recorder.writer.cancelWriting() }
+        removePartialFile(at: partial)
+        if failed {
+            throw NSError(domain: "recorder", code: 5, userInfo: [NSLocalizedDescriptionKey: "the writer could not start; no take, \(outputPath) untouched"])
+        }
+        writeDiagnostic(Data("recorder: stopped before the first frame; no take, \(outputPath) untouched\n".utf8))
+        exit(3)
+    }
     recorder.videoInput.markAsFinished()
     recorder.audioInput?.markAsFinished()
     await recorder.writer.finishWriting()
@@ -37,5 +47,5 @@ func finishTake(recorder: Recorder, partial: URL, output outputPath: String) asy
             NSLocalizedDescriptionKey: "could not move the take into place: \(String(cString: strerror(errno)))",
         ])
     }
-    FileHandle.standardError.write(Data("recorder: wrote \(outputPath)\(replacing ? " (replaced the file already there)" : "")\n".utf8))
+    writeDiagnostic(Data("recorder: wrote \(outputPath)\(replacing ? " (replaced the file already there)" : "")\n".utf8))
 }

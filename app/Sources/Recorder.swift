@@ -8,7 +8,9 @@
 //   env RECORDER_BG_IMAGE=<path to background>
 //   env RECORDER_EXCLUDE_PID=<this app's pid>, so the pill stays out of a
 //       screen recording
-//   duration 0 = open-ended, stop with SIGTERM (5-minute safety cap is built in)
+//   duration 0 = open-ended, stop with SIGTERM
+//   exit 0 saved, 1 failed, 2 discarded (SIGUSR2), 3 stopped before its first
+//       frame; if this app dies mid-take, the recorder saves the take itself
 
 import AppKit
 import AVFoundation
@@ -238,6 +240,29 @@ final class Recorder {
     func stop() {
         guard let process, process.isRunning else { return }
         process.terminate()
+    }
+
+    /// For app termination: finalize the take and wait for it, so quitting saves
+    /// rather than discards. Nil if the recorder was still finishing at the
+    /// deadline; it then saves on its own once this app is gone.
+    func finishBeforeExit(timeout: TimeInterval) -> Int32? {
+        onExit = { _ in }
+        onArmed = {}
+        guard let process, process.isRunning else { return nil }
+        process.terminate()
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline { usleep(20_000) }
+        return process.isRunning ? nil : process.terminationStatus
+    }
+
+    static func describeExit(_ status: Int32) -> String {
+        switch status {
+        case 0: return "saved (exit 0)"
+        case 1: return "failed (exit 1), see the recorder lines above"
+        case 2: return "discarded (exit 2)"
+        case 3: return "stopped before its first frame (exit 3), nothing written"
+        default: return "exited \(status)"
+        }
     }
 
     /// Abort the take. SIGUSR2 tells the recorder to discard its own partial

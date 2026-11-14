@@ -6,14 +6,24 @@ let OUTPUT_W = 1920
 let OUTPUT_H = 1080
 let WINDOW_BITRATE = 12_000_000
 
-let DISPLAY_MAX_W = 3840
-let DISPLAY_MAX_H = 2160
+let DISPLAY_MAX_SIDE = 4096
+let DISPLAY_FALLBACK_W = 3840
+let DISPLAY_FALLBACK_H = 2160
 let DISPLAY_MAX_BITRATE = 40_000_000
 
-func displayOutputSize(pixelWidth: Int, pixelHeight: Int) -> (width: Int, height: Int) {
-    let fit = min(1.0, Double(DISPLAY_MAX_W) / Double(pixelWidth), Double(DISPLAY_MAX_H) / Double(pixelHeight))
-    func even(_ v: Double) -> Int { max(2, Int(v / 2) * 2) }
-    return (even(Double(pixelWidth) * fit), even(Double(pixelHeight) * fit))
+/// The display's own size, shrunk to fit 4096 a side; if this machine's hardware
+/// H.264 encoder won't take that, the 3840x2160 box instead. Hardware limits
+/// differ by machine (the m3 encodes 4096x4096 in hardware, stella's Intel
+/// encoder stops short of 2304x4096) and past them VideoToolbox silently falls
+/// back to a software encoder that drops frames at 30 fps.
+func displayOutputSize(pixelWidth: Int, pixelHeight: Int, hardwareAccepts: (Int, Int) -> Bool) -> (width: Int, height: Int) {
+    func fit(_ maxW: Int, _ maxH: Int) -> (width: Int, height: Int) {
+        let scale = min(1.0, Double(maxW) / Double(pixelWidth), Double(maxH) / Double(pixelHeight))
+        func even(_ v: Double) -> Int { max(2, Int(v / 2) * 2) }
+        return (even(Double(pixelWidth) * scale), even(Double(pixelHeight) * scale))
+    }
+    let native = fit(DISPLAY_MAX_SIDE, DISPLAY_MAX_SIDE)
+    return hardwareAccepts(native.width, native.height) ? native : fit(DISPLAY_FALLBACK_W, DISPLAY_FALLBACK_H)
 }
 
 func displayBitrate(width: Int, height: Int) -> Int {

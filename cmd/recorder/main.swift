@@ -29,8 +29,15 @@
 //                              target, 1920x1080 for a display target.
 //   RECORDER_SOLID_RED=1     — probe mode: solid red bg, no shadow/padding,
 //                              used to verify alpha-through-compose end-to-end
+//   RECORDER_DISK_FLOOR_BYTES=<n> — stop and save once the output volume has
+//                              less free (default 2 GB)
 //   SIGUSR2                  — discard: stop and delete the take instead of
 //                              saving it; exits 2.
+//
+// Open-ended takes have no time cap. They stop on SIGTERM/SIGINT, on the free-
+// disk floor, or when the parent process exits; all three save the take.
+// Exit: 0 saved, 1 failed, 2 discarded, 3 stopped before the first frame
+// (nothing written), 64 usage.
 //
 // The take is written to a hidden `.<name>.partial-<pid>.mp4` beside the
 // output and renamed onto `outputPath` only once it is complete, so nothing
@@ -58,6 +65,13 @@ import ScreenCaptureKit
 
 // MARK: - Args
 
+// The app or CLI reading our stdout and stderr can die mid-take. Writing to
+// the closed pipes must not kill us (SIGPIPE) or raise (FileHandle) before the
+// take is saved, so both streams go through write(2) and its error is ignored.
+signal(SIGPIPE, SIG_IGN)
+func writeDiagnostic(_ data: Data) { data.withUnsafeBytes { _ = write(STDERR_FILENO, $0.baseAddress, $0.count) } }
+func writeLifecycle(_ data: Data) { data.withUnsafeBytes { _ = write(STDOUT_FILENO, $0.baseAddress, $0.count) } }
+
 enum CaptureTarget {
     case window(CGWindowID)
     case display(CGDirectDisplayID)
@@ -79,7 +93,7 @@ let args = CommandLine.arguments
 guard args.count >= 4,
       let captureTarget = CaptureTarget(argument: args[1]),
       let durationS = Double(args[2]) else {
-    FileHandle.standardError.write(Data("usage: recorder <windowID | display:<id> | display:main> <durationSeconds> <outputPath>\n".utf8))
+    writeDiagnostic(Data("usage: recorder <windowID | display:<id> | display:main> <durationSeconds> <outputPath>\n".utf8))
     exit(64)
 }
 let outputPath = args[3]
@@ -90,14 +104,14 @@ let probeSolidRed = ProcessInfo.processInfo.environment["RECORDER_SOLID_RED"] ==
 let syntheticSize: (width: Int, height: Int)?? = {
     guard let raw = ProcessInfo.processInfo.environment["RECORDER_SOURCE"], !raw.isEmpty else { return nil }
     guard raw.hasPrefix("synthetic") else {
-        FileHandle.standardError.write(Data("recorder: unknown RECORDER_SOURCE \(raw)\n".utf8))
+        writeDiagnostic(Data("recorder: unknown RECORDER_SOURCE \(raw)\n".utf8))
         exit(64)
     }
     let size = raw.dropFirst("synthetic".count)
     if size.isEmpty { return .some(nil) }
     let parts = size.dropFirst().split(separator: "x")
     guard size.first == ":", parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]), w >= 64, h >= 64 else {
-        FileHandle.standardError.write(Data("recorder: RECORDER_SOURCE must be synthetic or synthetic:<W>x<H>\n".utf8))
+        writeDiagnostic(Data("recorder: RECORDER_SOURCE must be synthetic or synthetic:<W>x<H>\n".utf8))
         exit(64)
     }
     return .some((w, h))
@@ -110,11 +124,15 @@ let handshake = ProcessInfo.processInfo.environment["RECORDER_HANDSHAKE"] == "1"
 // falls back to the procedural mesh gradient.
 let backgroundImagePath = ProcessInfo.processInfo.environment["RECORDER_BG_IMAGE"]
 
-/// When `durationS == 0` we run open-ended until SIGTERM/SIGINT. This safety
-/// cap stops a forgotten recording from filling the disk if the user walks
-/// away. 5 minutes is generous for a single demo clip; bump if it turns out to
-/// matter.
-let OPEN_ENDED_MAX_DURATION_S: Double = 300
+/// An open-ended take (`durationS == 0`) runs until a signal, its parent's
+/// death or this much free space left on the output volume; each one saves it.
+let diskFloorBytes: Int64 = ProcessInfo.processInfo.environment["RECORDER_DISK_FLOOR_BYTES"].flatMap { Int64($0) } ?? 2_000_000_000
+
+func freeBytes(onVolumeOf path: String) -> Int64? {
+    var fs = statfs()
+    guard statfs(path, &fs) == 0 else { return nil }
+    return Int64(fs.f_bavail) * Int64(fs.f_bsize)
+}
 
 /// If capture never produces a first written frame, stop rather than hang.
 /// Generous, because in controller mode this span legitimately covers the
@@ -127,7 +145,7 @@ let STARTUP_WATCHDOG_S: Double = 60
 /// "ready" without polling.
 func emitLifecycle(_ event: String) {
     guard handshake else { return }
-    FileHandle.standardOutput.write(Data("windowclip:\(event)\n".utf8))
+    writeLifecycle(Data("windowclip:\(event)\n".utf8))
 }
 
 func run() async throws {
@@ -162,12 +180,12 @@ func run() async throws {
     if captureAudio {
         do { audioSession = try setupAudioCapture(recorder: recorder) }
         catch {
-            FileHandle.standardError.write(Data("recorder: audio setup failed, recording silently: \(error.localizedDescription)\n".utf8))
+            writeDiagnostic(Data("recorder: audio setup failed, recording silently: \(error.localizedDescription)\n".utf8))
         }
     }
 
     // Stop trigger: either fixed duration elapses, signal fires (SIGTERM/SIGINT),
-    // or the open-ended safety cap kicks in. Whichever happens first.
+    // the parent dies, or the disk floor trips. Whichever happens first.
     //
     // Using a DispatchSemaphore signaled from any of three sources, then
     // bridged to async via a continuation. This blocks the run() task until
@@ -184,7 +202,7 @@ func run() async throws {
         // Close the take FIRST, before the (slow) orderly teardown, so the file
         // ends where the caller asked rather than wherever stopCapture landed.
         recorder.gate.closeNow()
-        FileHandle.standardError.write(Data("recorder: stop requested (\(reason))\n".utf8))
+        writeDiagnostic(Data("recorder: stop requested (\(reason))\n".utf8))
         stopSemaphore.signal()
     }
 
@@ -208,7 +226,7 @@ func run() async throws {
     let sigusr1Source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .global())
     sigusr1Source.setEventHandler {
         if recorder.gate.openNow() {
-            FileHandle.standardError.write(Data("recorder: go (SIGUSR1)\n".utf8))
+            writeDiagnostic(Data("recorder: go (SIGUSR1)\n".utf8))
         }
     }
     sigusr1Source.resume()
@@ -218,22 +236,41 @@ func run() async throws {
     sigusr2Source.setEventHandler { signalStop("SIGUSR2") }
     sigusr2Source.resume()
 
+    // The app or the CLI can die without stopping us (a crash, a SIGKILL, a
+    // forced logout). Saving is the safe answer: the take is the user's.
+    let parent = getppid()
+    guard parent != 1 else {
+        throw NSError(domain: "recorder", code: 6, userInfo: [NSLocalizedDescriptionKey: "started without a parent (ppid 1); refusing to record"])
+    }
+    let parentWatch = DispatchSource.makeProcessSource(identifier: parent, eventMask: .exit, queue: .global())
+    parentWatch.setEventHandler { signalStop("parent \(parent) exited") }
+    parentWatch.resume()
+    if getppid() != parent { signalStop("parent \(parent) exited") }
+
     // Duration is measured from the first frame actually written, NOT from
     // process start (DIG-807). Start-up here costs 0.6s on a warm machine and
     // was measured at 3.2s with a cold CoreAudio stack; charging that to the
     // recording silently shortened it, worst of all on the short clips where
     // the loss is proportionally largest.
-    let effectiveDuration: Double = durationS == 0 ? OPEN_ENDED_MAX_DURATION_S : durationS
     let durationLock = NSLock()
     var durationArmed = false
+    let outputDirectory = URL(fileURLWithPath: outputPath).deletingLastPathComponent().path
+    var diskWatch: DispatchSourceTimer?
     let armDuration: () -> Void = {
         durationLock.lock()
         if durationArmed { durationLock.unlock(); return }
         durationArmed = true
+        let watch = DispatchSource.makeTimerSource(queue: .global())
+        watch.schedule(deadline: .now(), repeating: 1.0)
+        watch.setEventHandler {
+            guard let free = freeBytes(onVolumeOf: outputDirectory), free < diskFloorBytes else { return }
+            signalStop("free-disk floor: \(free / 1_000_000) MB left on the output volume, floor \(diskFloorBytes / 1_000_000) MB")
+        }
+        diskWatch = watch
         durationLock.unlock()
-        DispatchQueue.global().asyncAfter(deadline: .now() + effectiveDuration) {
-            let reason = durationS == 0 ? "open-ended safety cap (\(Int(OPEN_ENDED_MAX_DURATION_S))s)" : "duration elapsed"
-            signalStop(reason)
+        watch.resume()
+        if durationS > 0 {
+            DispatchQueue.global().asyncAfter(deadline: .now() + durationS) { signalStop("duration elapsed") }
         }
     }
 
@@ -246,6 +283,7 @@ func run() async throws {
     // above stays on as the backstop for a stream that stops delivering.
     recorder.takeLimitSeconds = durationS > 0 ? durationS : nil
     recorder.onTakeComplete = { signalStop("duration elapsed") }
+    recorder.onWriterFailed = { signalStop("the writer could not start") }
     // Controller mode holds the take until "go"; every other caller records
     // from the first frame, exactly as before.
     recorder.gate = CaptureGate(open: !handshake)
@@ -259,11 +297,11 @@ func run() async throws {
         if !started { signalStop("no frames within \(Int(STARTUP_WATCHDOG_S))s") }
     }
 
-    FileHandle.standardError.write(Data("recorder: starting capture \(pxW)x\(pxH) → compose \(outW)x\(outH)\(probeSolidRed ? " [SOLID-RED PROBE]" : "")\(captureAudio ? " + mic" : " (no audio)") duration=\(durationS == 0 ? "open-ended" : "\(durationS)s")\n".utf8))
+    writeDiagnostic(Data("recorder: starting capture \(pxW)x\(pxH) → compose \(outW)x\(outH)\(probeSolidRed ? " [SOLID-RED PROBE]" : "")\(captureAudio ? " + mic" : " (no audio)") duration=\(durationS == 0 ? "open-ended" : "\(durationS)s")\n".utf8))
     audioSession?.startRunning()
     try await source.start()
 
-    FileHandle.standardError.write(Data("recorder: ready\n".utf8))
+    writeDiagnostic(Data("recorder: ready\n".utf8))
 
     // Block until stop is requested (signal or timer).
     await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
@@ -277,8 +315,10 @@ func run() async throws {
     sigintSource.cancel()
     sigusr1Source.cancel()
     sigusr2Source.cancel()
+    parentWatch.cancel()
+    durationLock.withLock { diskWatch }?.cancel()
 
-    FileHandle.standardError.write(Data("recorder: stopping stream...\n".utf8))
+    writeDiagnostic(Data("recorder: stopping stream...\n".utf8))
     try await source.stop()
     audioSession?.stopRunning()
 
@@ -299,7 +339,7 @@ Task {
         exit(0)
     } catch {
         removePartialFile(at: partialURL)
-        FileHandle.standardError.write(Data("recorder error: \(error)\n".utf8))
+        writeDiagnostic(Data("recorder error: \(error)\n".utf8))
         exit(1)
     }
 }
