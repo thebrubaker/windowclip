@@ -22,6 +22,11 @@
 //   RECORDER_EXCLUDE_PID=<n> — display capture leaves this process's windows
 //                              out of the frames (the app passes its own pid,
 //                              so its pill never appears in a screen recording)
+//   RECORDER_SOURCE=synthetic[:WxH] — test seam: generated frames instead of
+//                              ScreenCaptureKit (no TCC, no screen). Frame n
+//                              carries n as a 16-block barcode along its top
+//                              edge. Default size 1600x1000 for a window
+//                              target, 1920x1080 for a display target.
 //   RECORDER_SOLID_RED=1     — probe mode: solid red bg, no shadow/padding,
 //                              used to verify alpha-through-compose end-to-end
 //   SIGUSR2                  — discard: stop and delete the take instead of
@@ -98,6 +103,21 @@ func removePartial() {
 let excludedPID = ProcessInfo.processInfo.environment["RECORDER_EXCLUDE_PID"].flatMap { pid_t($0) }
 let captureAudio = ProcessInfo.processInfo.environment["RECORDER_NO_AUDIO"] != "1"
 let probeSolidRed = ProcessInfo.processInfo.environment["RECORDER_SOLID_RED"] == "1"
+let syntheticSize: (width: Int, height: Int)?? = {
+    guard let raw = ProcessInfo.processInfo.environment["RECORDER_SOURCE"], !raw.isEmpty else { return nil }
+    guard raw.hasPrefix("synthetic") else {
+        FileHandle.standardError.write(Data("recorder: unknown RECORDER_SOURCE \(raw)\n".utf8))
+        exit(64)
+    }
+    let size = raw.dropFirst("synthetic".count)
+    if size.isEmpty { return .some(nil) }
+    let parts = size.dropFirst().split(separator: "x")
+    guard size.first == ":", parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]), w >= 64, h >= 64 else {
+        FileHandle.standardError.write(Data("recorder: RECORDER_SOURCE must be synthetic or synthetic:<W>x<H>\n".utf8))
+        exit(64)
+    }
+    return .some((w, h))
+}()
 /// Controller mode: hold the take until SIGUSR1, and report lifecycle on stdout.
 /// Off by default so the direct/headless contract (and its stdout) is unchanged.
 let handshake = ProcessInfo.processInfo.environment["RECORDER_HANDSHAKE"] == "1"
@@ -510,7 +530,11 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptureAudio
               status == .complete else {
             return
         }
+        handleCompleteFrame(sampleBuffer)
+    }
 
+    /// Every complete frame, from ScreenCaptureKit or the synthetic source.
+    func handleCompleteFrame(_ sampleBuffer: CMSampleBuffer) {
         guard CMSampleBufferGetImageBuffer(sampleBuffer) != nil else { return }
 
         // A real frame in hand is the only honest proof that the whole path —
@@ -603,9 +627,126 @@ func setupAudioCapture(recorder: Recorder) throws -> AVCaptureSession {
     return session
 }
 
+protocol FrameSource {
+    func start() async throws
+    func stop() async throws
+}
+
+final class ScreenCaptureSource: FrameSource {
+    let stream: SCStream
+    init(filter: SCContentFilter, config: SCStreamConfiguration, recorder: Recorder, queue: DispatchQueue) throws {
+        stream = SCStream(filter: filter, configuration: config, delegate: recorder)
+        try stream.addStreamOutput(recorder, type: .screen, sampleHandlerQueue: queue)
+    }
+    func start() async throws { try await stream.startCapture() }
+    func stop() async throws { try await stream.stopCapture() }
+}
+
+/// 30 fps of generated BGRA frames stamped on the host clock, as SCK stamps its
+/// own. Window-shaped (transparent rounded corners) so the styled composite
+/// exercises alpha; frame n carries n as a barcode of 16 white/black blocks.
+final class SyntheticSource: FrameSource {
+    static let blockSize = 32
+    let width: Int
+    let height: Int
+    let recorder: Recorder
+    let queue: DispatchQueue
+    private var timer: DispatchSourceTimer?
+    private var frameIndex = 0
+    private let pool: CVPixelBufferPool
+    private let base: [UInt8]
+
+    init(width: Int, height: Int, recorder: Recorder, queue: DispatchQueue) throws {
+        self.width = width
+        self.height = height
+        self.recorder = recorder
+        self.queue = queue
+        let attrs: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+        ]
+        var pool: CVPixelBufferPool?
+        CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attrs as CFDictionary, &pool)
+        guard let pool else {
+            throw NSError(domain: "recorder", code: 20, userInfo: [NSLocalizedDescriptionKey: "synthetic pool creation failed"])
+        }
+        self.pool = pool
+        let radius = min(width, height) / 20
+        var base = [UInt8](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let i = (y * width + x) * 4
+                let cx = x < radius ? radius - x : (x >= width - radius ? x - (width - radius - 1) : 0)
+                let cy = y < radius ? radius - y : (y >= height - radius ? y - (height - radius - 1) : 0)
+                if cx * cx + cy * cy > radius * radius { continue }
+                base[i] = UInt8(255 * y / height)          // B
+                base[i + 1] = UInt8(160)                    // G
+                base[i + 2] = UInt8(255 * x / width)        // R
+                base[i + 3] = 255
+            }
+        }
+        self.base = base
+    }
+
+    func start() async throws {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: .nanoseconds(1_000_000_000 / 30), leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in self?.emitFrame() }
+        self.timer = timer
+        timer.resume()
+    }
+
+    func stop() async throws {
+        queue.sync { timer?.cancel(); timer = nil }
+    }
+
+    private func emitFrame() {
+        var buffer: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer)
+        guard let buffer else { return }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        let rowBytes = CVPixelBufferGetBytesPerRow(buffer)
+        let dst = CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to: UInt8.self)
+        base.withUnsafeBufferPointer { src in
+            for y in 0..<height {
+                memcpy(dst + y * rowBytes, src.baseAddress! + y * width * 4, width * 4)
+            }
+        }
+        let n = frameIndex
+        let b = Self.blockSize
+        let top = b
+        for bit in 0..<16 {
+            let value: UInt8 = (n >> (15 - bit)) & 1 == 1 ? 255 : 0
+            let left = b * 2 + bit * b
+            guard left + b <= width, top + b <= height else { break }
+            for y in top..<(top + b) {
+                let row = dst + y * rowBytes + left * 4
+                for x in 0..<b {
+                    row[x * 4] = value; row[x * 4 + 1] = value; row[x * 4 + 2] = value; row[x * 4 + 3] = 255
+                }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        frameIndex += 1
+
+        var format: CMVideoFormatDescription?
+        CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: buffer, formatDescriptionOut: &format)
+        guard let format else { return }
+        var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 30),
+                                        presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+                                        decodeTimeStamp: .invalid)
+        var sample: CMSampleBuffer?
+        CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: buffer,
+                                                 formatDescription: format, sampleTiming: &timing, sampleBufferOut: &sample)
+        guard let sample else { return }
+        recorder.handleCompleteFrame(sample)
+    }
+}
+
 struct CaptureSetup {
-    let filter: SCContentFilter
-    let config: SCStreamConfiguration
+    let makeSource: (Recorder, DispatchQueue) throws -> FrameSource
     let captureW: Int
     let captureH: Int
     let outW: Int
@@ -646,6 +787,12 @@ func windowCaptureSetup(windowID: CGWindowID, content: SCShareableContent) async
     config.scalesToFit = true
     // SCStreamConfiguration.backgroundColor defaults to clear — alpha-correct.
 
+    let composer = try await windowComposer(outW: outW, outH: outH)
+    return CaptureSetup(makeSource: { try ScreenCaptureSource(filter: filter, config: config, recorder: $0, queue: $1) },
+                        captureW: pxW, captureH: pxH, outW: outW, outH: outH, bitrate: WINDOW_BITRATE, composer: composer)
+}
+
+func windowComposer(outW: Int, outH: Int) async throws -> Composer {
     // Build the background CIImage. Priority:
     //   1. RECORDER_BG_IMAGE env var → load JPEG/PNG/HEIC, scale-to-fill
     //   2. Probe mode → solid red
@@ -665,8 +812,24 @@ func windowCaptureSetup(windowID: CGWindowID, content: SCShareableContent) async
             makeMeshGradientBackground(width: outW, height: outH)
         }
     }
-    let composer = try Composer(outputW: outW, outputH: outH, layout: probeSolidRed ? .solidProbe : .styled, background: backgroundImage)
-    return CaptureSetup(filter: filter, config: config, captureW: pxW, captureH: pxH, outW: outW, outH: outH, bitrate: WINDOW_BITRATE, composer: composer)
+    return try Composer(outputW: outW, outputH: outH, layout: probeSolidRed ? .solidProbe : .styled, background: backgroundImage)
+}
+
+func syntheticWindowSetup(width: Int, height: Int) async throws -> CaptureSetup {
+    FileHandle.standardError.write(Data("recorder: target synthetic window \(width)x\(height) px\n".utf8))
+    let outW = probeSolidRed ? width : OUTPUT_W
+    let outH = probeSolidRed ? height : OUTPUT_H
+    let composer = try await windowComposer(outW: outW, outH: outH)
+    return CaptureSetup(makeSource: { try SyntheticSource(width: width, height: height, recorder: $0, queue: $1) },
+                        captureW: width, captureH: height, outW: outW, outH: outH, bitrate: WINDOW_BITRATE, composer: composer)
+}
+
+func syntheticDisplaySetup(width: Int, height: Int) throws -> CaptureSetup {
+    let (outW, outH) = displayOutputSize(pixelWidth: width, pixelHeight: height)
+    FileHandle.standardError.write(Data("recorder: target synthetic display \(width)x\(height) px\n".utf8))
+    let composer = try displayComposer(outW: outW, outH: outH)
+    return CaptureSetup(makeSource: { try SyntheticSource(width: outW, height: outH, recorder: $0, queue: $1) },
+                        captureW: outW, captureH: outH, outW: outW, outH: outH, bitrate: displayBitrate(width: outW, height: outH), composer: composer)
 }
 
 func displayCaptureSetup(displayID: CGDirectDisplayID, content: SCShareableContent) throws -> CaptureSetup {
@@ -696,23 +859,35 @@ func displayCaptureSetup(displayID: CGDirectDisplayID, content: SCShareableConte
     config.showsCursor = true
     config.scalesToFit = true
 
+    let composer = try displayComposer(outW: outW, outH: outH)
+    return CaptureSetup(makeSource: { try ScreenCaptureSource(filter: filter, config: config, recorder: $0, queue: $1) },
+                        captureW: outW, captureH: outH, outW: outW, outH: outH, bitrate: displayBitrate(width: outW, height: outH), composer: composer)
+}
+
+func displayComposer(outW: Int, outH: Int) throws -> Composer {
     let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0))
         .cropped(to: CGRect(x: 0, y: 0, width: outW, height: outH))
-    let composer = try Composer(outputW: outW, outputH: outH, layout: .passthrough, background: black)
-    return CaptureSetup(filter: filter, config: config, captureW: outW, captureH: outH, outW: outW, outH: outH, bitrate: displayBitrate(width: outW, height: outH), composer: composer)
+    return try Composer(outputW: outW, outputH: outH, layout: .passthrough, background: black)
 }
 
 func run() async throws {
-    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
     let setup: CaptureSetup
-    switch captureTarget {
-    case let .window(windowID):
-        setup = try await windowCaptureSetup(windowID: windowID, content: content)
-    case let .display(displayID):
-        setup = try displayCaptureSetup(displayID: displayID, content: content)
+    if let synthetic = syntheticSize {
+        switch captureTarget {
+        case .window:
+            setup = try await syntheticWindowSetup(width: synthetic?.width ?? 1600, height: synthetic?.height ?? 1000)
+        case .display:
+            setup = try syntheticDisplaySetup(width: synthetic?.width ?? 1920, height: synthetic?.height ?? 1080)
+        }
+    } else {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        switch captureTarget {
+        case let .window(windowID):
+            setup = try await windowCaptureSetup(windowID: windowID, content: content)
+        case let .display(displayID):
+            setup = try displayCaptureSetup(displayID: displayID, content: content)
+        }
     }
-    let filter = setup.filter
-    let config = setup.config
     let pxW = setup.captureW
     let pxH = setup.captureH
     let outW = setup.outW
@@ -720,9 +895,8 @@ func run() async throws {
 
     let recorder = try Recorder(outputURL: partialURL, outputW: outW, outputH: outH, bitrate: setup.bitrate, withAudio: captureAudio, composer: setup.composer)
 
-    let stream = SCStream(filter: filter, configuration: config, delegate: recorder)
     let videoQueue = DispatchQueue(label: "windowclip.recorder.video", qos: .userInteractive)
-    try stream.addStreamOutput(recorder, type: .screen, sampleHandlerQueue: videoQueue)
+    let source = try setup.makeSource(recorder, videoQueue)
 
     var audioSession: AVCaptureSession? = nil
     if captureAudio {
@@ -827,7 +1001,7 @@ func run() async throws {
 
     FileHandle.standardError.write(Data("recorder: starting capture \(pxW)x\(pxH) → compose \(outW)x\(outH)\(probeSolidRed ? " [SOLID-RED PROBE]" : "")\(captureAudio ? " + mic" : " (no audio)") duration=\(durationS == 0 ? "open-ended" : "\(durationS)s")\n".utf8))
     audioSession?.startRunning()
-    try await stream.startCapture()
+    try await source.start()
 
     FileHandle.standardError.write(Data("recorder: ready\n".utf8))
 
@@ -845,7 +1019,7 @@ func run() async throws {
     sigusr2Source.cancel()
 
     FileHandle.standardError.write(Data("recorder: stopping stream...\n".utf8))
-    try await stream.stopCapture()
+    try await source.stop()
     audioSession?.stopRunning()
 
     if stopLock.withLock({ discard }) {
