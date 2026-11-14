@@ -44,6 +44,7 @@ case "${1:-}" in
       "$name records your microphone as the voiceover track of a screen recording." "$out"
     plutil -replace AppIdentityKind -string "$kind" "$out"
     plutil -replace AppBuildSHA -string "${5:-unknown}" "$out"
+    plutil -replace AppDoctor -integer 1 "$out"
     plutil -lint -s "$out"
     ;;
   *)

@@ -3,6 +3,7 @@
 #   session   the shipping SessionController and app Recorder against stubs
 #   recorder  the real recorder binary on synthetic frames
 #   identity  which folders, socket and log each copy resolves to (PLAN.md part D)
+#   doctor    --doctor and `windowclip doctor` on fixtures (PLAN.md part E)
 #   clickzoom the Remotion render check; renders video, so only with --clickzoom,
 #             and on stella or legion-tower rather than the m3
 # Nothing here records a screen, launches the app or touches its socket.
@@ -30,6 +31,7 @@ run() {
 run session "$HERE/session-probe/run.sh"
 run recorder "$HERE/recorder-suite/run.sh"
 run identity "$HERE/identity-suite/run.sh"
+run doctor "$HERE/doctor-suite/run.sh"
 if [[ $clickzoom == 1 ]]; then
   run clickzoom bash -c "cd '$REPO' && bun run test/run-tests.ts"
 fi

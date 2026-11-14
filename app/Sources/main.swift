@@ -51,6 +51,10 @@ func usage() -> Never {
       --debug-agent              dress the surface as an agent session (ring + attribution)
       --debug-label <name>       who the attribution credits (default Claude)
 
+    Read-only (prints JSON, writes nothing, starts nothing):
+      --doctor [--doctor-root <dir>]  what this copy is and what its next take
+                                      will do; <dir> reads a fixture instead
+
     End-to-end (drives the real session, then quits):
       --debug-record <target>       window (CGWindowID or app/title text), or display:<id|main>
       --debug-record-seconds <s>    how long to record (default 5)
@@ -60,8 +64,22 @@ func usage() -> Never {
     exit(0)
 }
 
-var options = LaunchOptions()
 var argv = Array(CommandLine.arguments.dropFirst())
+// Before anything else: the doctor reads files and exits, and must never reach
+// NSApplication, the log or the socket.
+if argv.first == "--doctor" {
+    var root: URL?
+    switch argv.count {
+    case 1: break
+    case 3 where argv[1] == "--doctor-root": root = URL(fileURLWithPath: argv[2])
+    default:
+        FileHandle.standardError.write(Data("usage: --doctor [--doctor-root <dir>]\n".utf8))
+        exit(64)
+    }
+    exit(Doctor.run(root: root))
+}
+
+var options = LaunchOptions()
 var i = 0
 while i < argv.count {
     switch argv[i] {
