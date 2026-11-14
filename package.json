@@ -9,7 +9,7 @@
   "scripts": {
     "build:clicks": "swiftc -O -target arm64-apple-macosx15.0 cmd/clicks/main.swift -o cmd/clicks/clicks",
     "build:windows": "swiftc -O -target arm64-apple-macosx15.0 cmd/windows/main.swift -o cmd/windows/windows",
-    "build:recorder": "swiftc -O -target arm64-apple-macosx15.0 cmd/recorder/main.swift -o cmd/recorder/recorder",
+    "build:recorder": "swiftc -O -target arm64-apple-macosx15.0 cmd/recorder/*.swift -o cmd/recorder/recorder",
     "build:app": "./app/build.sh",
     "build": "pnpm run build:clicks && pnpm run build:windows && pnpm run build:recorder && pnpm run build:app",
     "cli": "bun run src/cli.ts",
