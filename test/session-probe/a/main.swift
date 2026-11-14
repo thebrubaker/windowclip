@@ -31,6 +31,7 @@ import Foundation
     check("second hotkey take output", Recorder.prepares.last!.output == Recorder.defaultPath, Recorder.prepares.last!.output)
     screenTakeThenHotkeyTake(s, pill, w, scratch: scratch)
     devCommandCases(s, w)
+    stateFileCases(s, w, scratch: scratch)
     for (i, p) in Recorder.prepares.enumerated() { print("      prepare[\(i)] output=\(p.output) bg=\(p.background)") }
     dumpLog()
 }

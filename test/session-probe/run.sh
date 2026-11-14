@@ -19,6 +19,11 @@ if [[ -f "$SRC/Identity.swift" ]]; then
   "$TREE/app/identity.sh" swift > "$WORK/IdentityTable.swift"
   SHIM+=("$SRC/Identity.swift" "$WORK/IdentityTable.swift")
 fi
+if [[ -f "$SRC/StateFile.swift" ]]; then
+  SHIM+=("$SRC/StateFile.swift"); STATE_CASE=("$HERE/a/state-case.swift")
+else
+  STATE_CASE=("$HERE/a/state-case-none.swift")
+fi
 if [[ -f "$SRC/DevCommands.swift" ]]; then
   DEV_CASE=("$HERE/a/dev-case.swift" "$SRC/DevCommands.swift" "$SRC/ControlServer.swift")
 else
@@ -31,7 +36,7 @@ else
   API=("$HERE/api-window.swift"); STUB_RECORDER=("$HERE/stub-recorder.swift")
 fi
 
-swiftc -swift-version 5 -o "$WORK/probe-a" "$HERE/stubs.swift" "${API[@]}" "${STUB_RECORDER[@]}" "${DEV_CASE[@]}" "$HERE/a/main.swift" \
+swiftc -swift-version 5 -o "$WORK/probe-a" "$HERE/stubs.swift" "${API[@]}" "${STUB_RECORDER[@]}" "${DEV_CASE[@]}" "${STATE_CASE[@]}" "$HERE/a/main.swift" \
   "${SHIM[@]}" "$SRC/SessionController.swift" 2>"$WORK/build-a.log" || { cat "$WORK/build-a.log"; exit 2; }
 swiftc -swift-version 5 -o "$WORK/probe-b" "$HERE/stubs.swift" "${API[@]}" "$HERE/b/main.swift" \
   "${SHIM[@]}" "$SRC/SessionController.swift" "$SRC/Recorder.swift" 2>"$WORK/build-b.log" || { cat "$WORK/build-b.log"; exit 2; }

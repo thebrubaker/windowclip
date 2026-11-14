@@ -54,6 +54,38 @@ struct SessionRequest {
     static let human = SessionRequest()
 }
 
+/// Where a take's output and background come from. The one resolver: the take
+/// itself and every report of what the next take will do go through it.
+struct TakePlan {
+    enum Origin: String { case request, `default`, saved }
+
+    var output: URL
+    var outputFrom: Origin
+    /// Nil for a screen take, or when there is no background at all.
+    var background: Background?
+    var backgroundFrom: Origin?
+
+    @MainActor static func resolve(request: SessionRequest, isDisplay: Bool) -> TakePlan {
+        let output = request.output ?? Recorder.defaultOutputURL()
+        let outputFrom: Origin = request.output != nil ? .request : .default
+        guard !isDisplay else { return TakePlan(output: output, outputFrom: outputFrom) }
+        let background = request.background ?? Backgrounds.shared.current
+        let from: Origin = request.background != nil ? .request : (background?.isDefault ?? true) ? .default : .saved
+        return TakePlan(output: output, outputFrom: outputFrom, background: background, backgroundFrom: from)
+    }
+
+    var payload: [String: Any] {
+        var p: [String: Any] = ["output": output.path, "outputFrom": outputFrom.rawValue]
+        if let backgroundFrom {
+            p["background"] = background?.id ?? "<mesh gradient>"
+            p["backgroundFrom"] = backgroundFrom.rawValue
+        } else {
+            p["background"] = "none"
+        }
+        return p
+    }
+}
+
 /// What a control-surface caller learns about the session it asked for.
 struct SessionResult {
     var ok: Bool
@@ -78,6 +110,7 @@ final class SessionController {
         didSet {
             guard phase != oldValue else { return }
             Log.write("session", "take \(takeNumber): \(describe(oldValue)) → \(describe(phase))")
+            publishState()
             onPhaseChange?(phase)
         }
     }
@@ -333,7 +366,9 @@ final class SessionController {
     /// Spawn the recorder now and let it warm. It captures but discards frames
     /// until `go()`, so nothing of the countdown lands in the file.
     private func prepareRecorder(for target: CaptureTarget) {
-        let output = request.output ?? Recorder.defaultOutputURL()
+        let plan = TakePlan.resolve(request: request, isDisplay: target.isDisplay)
+        activePlan = plan
+        let output = plan.output
         preparedOutput = output
         recorder.onArmed = { [weak self] in self?.recorderArmed() }
         recorder.onExit = { [weak self] status in self?.recorderExited(status: status) }
@@ -341,9 +376,9 @@ final class SessionController {
             try FileManager.default.createDirectory(
                 at: output.deletingLastPathComponent(), withIntermediateDirectories: true
             )
-            let background = target.isDisplay ? nil : (request.background ?? Backgrounds.shared.current)
+            let background = plan.background
             activeBackground = background
-            let backgroundOrigin = request.background != nil ? "request" : (background?.isDefault ?? true) ? "default" : "saved"
+            let backgroundOrigin = plan.backgroundFrom?.rawValue ?? "none"
             let targetDescription: String
             switch target {
             case let .window(window): targetDescription = "window=\(window.id) app=\(window.app)"
@@ -351,8 +386,9 @@ final class SessionController {
             }
             Log.write("take", "take \(takeNumber): source=\(request.source.isAgent ? "agent(\(request.source.label ?? ""))" : "human")"
                 + " \(targetDescription)"
-                + " output=\(output.path) (from: \(request.output != nil ? "request" : "default"))"
+                + " output=\(output.path) (from: \(plan.outputFrom.rawValue))"
                 + (target.isDisplay ? " background=none (screen take)" : " background=\(background?.id ?? "<mesh gradient>") (from: \(backgroundOrigin))"))
+            publishState()
             try recorder.prepare(target: target, output: output, background: background?.url)
         } catch {
             note("failed to start recorder: \(error.localizedDescription)")
@@ -550,6 +586,38 @@ final class SessionController {
         target = nil
         preparedOutput = nil
         activeBackground = nil
+        activePlan = nil
+        publishState()
+    }
+
+    // MARK: - State file
+
+    /// Where `state.json` goes; nil publishes nothing.
+    var stateFile: StateFile? {
+        didSet { publishState() }
+    }
+
+    private var activePlan: TakePlan?
+
+    func stateSnapshot() -> [String: Any] {
+        var snapshot: [String: Any] = ["phase": describe(phase), "take": takeNumber]
+        if let activePlan {
+            var request = activePlan.payload
+            request["source"] = source.isAgent ? "agent" : "human"
+            if let label = source.label { request["label"] = label }
+            switch target {
+            case let .window(window)?: request["windowId"] = Int(window.id); request["app"] = window.app
+            case let .display(display)?: request["displayId"] = Int(display.id)
+            case nil: break
+            }
+            snapshot["request"] = request
+        }
+        snapshot["next"] = TakePlan.resolve(request: .human, isDisplay: false).payload
+        return snapshot
+    }
+
+    private func publishState() {
+        stateFile?.publish(stateSnapshot())
     }
 
     /// Called on app termination (quit, logout, restart): a take in progress is

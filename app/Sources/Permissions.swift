@@ -38,7 +38,7 @@ enum Permissions {
     /// moment the user granted the permission — collapsing the relaunch state and
     /// leaving the user with a window that says "Allowed" over an app that still
     /// cannot capture anything.
-    private static var screenGrantedAtLaunch = false
+    private(set) static var screenGrantedAtLaunch = false
     private static var didSnapshot = false
 
     /// Call once, early in `applicationDidFinishLaunching`. This is a read; it
