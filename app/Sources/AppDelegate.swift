@@ -178,6 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         installStatusItem()
         Backgrounds.shared.warmThumbnails()
         startControlServer(session: session)
+        session.stateFile = StateFile(app: { [weak self] in self?.selfReport() ?? [:] })
         note(identity.registersHotkeys ? "ready — ⌥⌘R to record" : "ready")
 
         // Last, and only if something is missing. The hotkey, the status item and the
@@ -185,6 +186,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // without fixing anything still has a working app to come back to — and so
         // the window is never the reason the rest of the app didn't start.
         showSetupIfIncomplete()
+    }
+
+    /// What `state.json` says about this copy, beside the session.
+    private func selfReport() -> [String: Any] {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let identity = AppIdentity.current
+        return [
+            "identity": identity.kind.rawValue,
+            "bundleId": Bundle.main.bundleIdentifier ?? "none",
+            "version": info["CFBundleShortVersionString"] as? String ?? "?",
+            "build": info["AppBuildSHA"] as? String ?? "unknown",
+            "executable": Bundle.main.executablePath ?? CommandLine.arguments[0],
+            "recorder": Recorder.binaryURL.path,
+            "permissions": [
+                "screenNow": CGPreflightScreenCaptureAccess(),
+                "screenAtLaunch": Permissions.screenGrantedAtLaunch,
+                "microphone": AVCaptureDevice.authorizationStatus(for: .audio).rawValue,
+            ],
+            "hotkey": identity.registersHotkeys ? (HotkeyManager.shared.isRegistered(.toggle) ? "registered" : "failed") : "none",
+            "socket": control != nil ? ControlServer.socketURL.path : "not listening",
+        ]
     }
 
     /// The external control surface. Failing to open it must not take the app
