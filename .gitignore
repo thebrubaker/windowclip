@@ -22,3 +22,6 @@ render/public/source.*
 
 # Packaged install artifacts (built by app/package.sh, published to Releases)
 app/dist/
+
+# Left by the global prepare-commit-msg hook (swift package lefthook).
+.build/
