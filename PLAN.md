@@ -12,7 +12,7 @@ Why it exists: in November 2026 a session-state leak silently sent two days of J
 |---|---|---|---|
 | A | 6 CLAUDE.md v1, `.gitignore`, this plan | done | see `git log -- PLAN.md` |
 | B | 4 test suite (DIG-2650) | done | see `git log -- test/run.sh` |
-| C | 5 recorder fixes (DIG-2653 and two more) | not started | |
+| C | 5 recorder fixes (DIG-2653 and two more) | done | see `git log -- test/encoder-grid` |
 | D | 2 test identity | not started | |
 | E | 1 doctor | not started | |
 | F | 3 stella | not started | |
@@ -44,7 +44,7 @@ Branch `feat/testability`, made from `origin/main` at `41fbb12`. The lead grants
 - **Stopping the recorder before it writes a frame aborts it.**
   - A SIGTERM or SIGINT (or the 60 s watchdog) before the first written frame reaches `videoInput.markAsFinished()` while the writer status is 0. AVFoundation raises an exception and the recorder aborts with exit 134. That includes handshake mode, armed but before `go`.
   - Related: if `writer.startWriting()` fails, every later frame retries it on the failed writer (`ensureSession`).
-- **The display size box is stricter than the encoder.** Recordings are fitted within 3840×2160 (`DISPLAY_MAX_W/H`). The measured encoder boundary (4096×2304 accepted, 4480×2520 refused) fits H.264 level 5.2's frame-size limit of 36,864 macroblocks; 4096×2304 is exactly 36,864. This is a hypothesis, to be measured in C.
+- **The display size box was stricter than the encoder.** Measured in C (`test/encoder-grid`): the limit is the *hardware* encoder's, and it is not the 36,864-macroblock rule. Past it, VideoToolbox silently uses a software H.264 encoder that drops frames at 30 fps. The m3 runs up to 4096×4096 in hardware (4112 on either side is software); stella runs 4096×2320 but not 2304×4096. Display takes now fit 4096 a side when the hardware takes that size, else 3840×2160.
 - **The stray `.build/` comes from Joel's global git hook.** `~/.git-hooks/prepare-commit-msg` runs `swift package --build-path .build/lefthook …`.
 - **The toolchain.**
   - m3: Xcode, SDK 27.2, Swift 6.4.2.
@@ -186,3 +186,11 @@ B is the safety net for everything after it and builds the instrument C and E ar
   - **Positive controls:** the session suite on `3fe3170` exits 1 (7 checks fail). The recorder suite on a copy with the rename skipped exits 1 ("partial renamed" and the five checks that read the file fail).
   - **Not done:** `WINDOWCLIP_SIGN_ID=- ./app/build.sh` was refused by auto mode, so the bundle build is unproven on this branch. `build.sh` only copies `cmd/recorder/recorder`, which `build:recorder` now produces at minos 15.0. The x86_64 recorder also compiles.
   - **For C:** the XFAIL case is the red test for "stop before the writer starts". Until it passes, every suite run leaves a `recorder-*.ips` in `~/Library/Logs/DiagnosticReports`. The parent-death and disk-floor tests can drive the same `Take` helper in `test/recorder-suite/main.swift`.
+- **C (2026-11-13):** the cap is gone; parent death, the 2 GB disk floor (`RECORDER_DISK_FLOOR_BYTES`) and app quit/logout/restart all save the take; stop before the first frame exits 3; a `startWriting` failure exits 1 once. Suite: session 12/12, recorder 32/32, no known failures, about 90 s on the m3.
+  - **Red then green:** parent SIGKILL, disk floor, stop before go (exit 134 → 3), writer failure (read-only dir: exit 134 → 1, one line), the size fit, and a session probe case for quitting mid-take (`quit.mp4` missing → saved).
+  - **Found on the way:** a recorder whose parent dies loses the pipes it writes to, and its next diagnostic line killed it by SIGPIPE before the rename (measured: a reader that exits, then SIGTERM, left `.partial`). The suite's parent case kills the output reader too; the fix ignores SIGPIPE and writes through `write(2)`.
+  - **Not like the plan:** `startWriting` failure never retried per frame; the next `append` raised and aborted. The size rule is the hardware check above, not macroblocks.
+  - **stella (synthetic, x86_64):** the encoder grid above; an open-ended take stopped by SIGTERM at 310 s saved 308.43 s and 9,242 frames.
+  - **Real window take on the m3** (Finder, muted, cmux's grant), 2 s, PSNR against one `306711c` take: `306711c` A/A 49.6–49.8 dB, this branch 49.9–51.5 dB, a `padRatio` 0.075 control 20.9 dB. So stage B's synthetic-only claim now stands on real ScreenCaptureKit frames too.
+  - **Controls:** the session suite on `3fe3170` exits 1 (8 checks); the recorder suite with the rename skipped exits 1 (8 checks, including parent death and the disk floor).
+  - **Cleanup:** the eight `recorder*.ips` from stages B and C (all `/private/tmp` binaries) were deleted by name; none appeared after the fix. Still unproven on this branch: the ad hoc `app/build.sh` run (with Joel), and an app quit during a real take (only the probe's stand-in has been quit mid-take).
