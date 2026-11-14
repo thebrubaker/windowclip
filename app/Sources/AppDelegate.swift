@@ -161,8 +161,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let session = SessionController(pill: pill)
         self.session = session
 
-        let ok = HotkeyManager.shared.register(.toggle) { [weak session] in session?.toggle() }
-        if ok {
+        let identity = AppIdentity.current
+        if !identity.registersHotkeys {
+            note("\(identity.name): no hotkeys; drive it with the control socket's toggle and pick")
+        } else if HotkeyManager.shared.register(.toggle, action: { [weak session] in session?.toggle() }) {
             note("registered ⌥⌘R (Esc stays yours until a pill is up)")
         } else {
             // A hotkey we couldn't claim means the app silently does nothing —
@@ -176,7 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         installStatusItem()
         Backgrounds.shared.warmThumbnails()
         startControlServer(session: session)
-        note("ready — ⌥⌘R to record")
+        note(identity.registersHotkeys ? "ready — ⌥⌘R to record" : "ready")
 
         // Last, and only if something is missing. The hotkey, the status item and the
         // control socket all come up first so a user who dismisses this window
@@ -222,6 +224,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let error = result.error { payload["error"] = error }
             respond(payload)
         }
+
+        if DevCommands.handle(request, session: session, window: { id in
+            WindowEnumerator.list().first { $0.id == id }
+        }, respond: respond) { return }
 
         switch request.command {
         case "ping":
@@ -309,10 +315,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// last five recordings stay findable after their pill has faded.
     private func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        let identity = AppIdentity.current
         item.button?.image = NSImage(
             systemSymbolName: "record.circle",
-            accessibilityDescription: "Windowclip"
+            accessibilityDescription: identity.name
         )
+        if !identity.statusTitle.isEmpty {
+            item.button?.title = identity.statusTitle
+            item.button?.imagePosition = .imageLeading
+        }
         let menu = NSMenu()
         // The recents section decides its own enablement (a file that has moved
         // is shown greyed rather than firing into nothing), so AppKit's automatic
@@ -392,7 +403,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(
-            NSMenuItem(title: "Quit Windowclip", action: #selector(NSApp.terminate(_:)), keyEquivalent: "q")
+            NSMenuItem(title: "Quit \(AppIdentity.current.name)", action: #selector(NSApp.terminate(_:)), keyEquivalent: "q")
         )
     }
 
@@ -908,7 +919,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func showSetupIfIncomplete() -> Bool {
         let screen = Permissions.screenRecording
         let mic = Permissions.microphone
-        guard !(screen == .granted && mic == .granted) else {
+        let micDone = mic == .granted || !AppIdentity.current.recordsMicrophone
+        guard !(screen == .granted && micDone) else {
             note("gate: screen=\(screen.rawValue), mic=\(mic.rawValue) — complete, staying invisible")
             return false
         }

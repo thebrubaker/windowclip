@@ -55,21 +55,20 @@ final class ControlServer {
             throw ControlError.pathTooLong(path)
         }
 
+        // A crashed or SIGKILLed app leaves its socket file behind, and bind
+        // fails on it forever, so a dead socket is cleared. One that answers
+        // belongs to a running instance and is left alone.
+        switch Self.probe(path) {
+        case .answers: throw ControlError.inUse(path)
+        case let .unreachable(code): throw ControlError.posix("connect", code)
+        case .stale: unlink(path)
+        case .absent: break
+        }
+
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw ControlError.posix("socket", errno) }
 
-        // A crashed or SIGKILLed app leaves the socket file behind; bind would
-        // fail with EADDRINUSE forever. Clearing it is safe because only one
-        // instance is meant to be listening.
-        unlink(path)
-
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        withUnsafeMutablePointer(to: &addr.sun_path) { raw in
-            raw.withMemoryRebound(to: CChar.self, capacity: 104) { dest in
-                _ = strncpy(dest, path, 103)
-            }
-        }
+        var addr = Self.address(path)
         let size = socklen_t(MemoryLayout<sockaddr_un>.size)
         let bindResult = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, size) }
@@ -93,6 +92,38 @@ final class ControlServer {
         source.resume()
         acceptSource = source
         note("control socket listening at \(path)")
+    }
+
+    enum SocketState: Equatable { case absent, stale, answers, unreachable(Int32) }
+
+    /// Connects and hangs up. A listener logs that as an empty request.
+    static func probe(_ path: String) -> SocketState {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return .unreachable(errno) }
+        defer { close(fd) }
+        var addr = address(path)
+        let result = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        if result == 0 { return .answers }
+        switch errno {
+        case ENOENT: return .absent
+        case ECONNREFUSED: return .stale
+        case let code: return .unreachable(code)
+        }
+    }
+
+    private static func address(_ path: String) -> sockaddr_un {
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutablePointer(to: &addr.sun_path) { raw in
+            raw.withMemoryRebound(to: CChar.self, capacity: 104) { dest in
+                _ = strncpy(dest, path, 103)
+            }
+        }
+        return addr
     }
 
     func stop() {
@@ -196,9 +227,12 @@ final class ControlServer {
     enum ControlError: LocalizedError {
         case posix(String, Int32)
         case pathTooLong(String)
+        case inUse(String)
 
         var errorDescription: String? {
             switch self {
+            case let .inUse(path):
+                return "another instance is listening at \(path); leaving it alone"
             case let .posix(call, code):
                 return "\(call) failed: \(String(cString: strerror(code))) (\(code))"
             case let .pathTooLong(path):

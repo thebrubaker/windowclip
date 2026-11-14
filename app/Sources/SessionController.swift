@@ -153,6 +153,14 @@ final class SessionController {
         }
     }
 
+    /// What choosing a target in the open picker does.
+    func pick(_ target: CaptureTarget) -> Bool {
+        guard phase == .picking else { return false }
+        picker.close(cancelled: false)
+        picker.onPick(target)
+        return true
+    }
+
     func pickScreen() {
         switch phase {
         case .idle:

@@ -80,6 +80,8 @@ final class HotkeyManager {
 
     @discardableResult
     func register(_ binding: Binding, action: @escaping () -> Void) -> Bool {
+        // The dev copy runs beside the installed one and grabs no keys, Esc included.
+        guard AppIdentity.current.registersHotkeys else { return false }
         installHandlerIfNeeded()
         actions[binding] = action
         guard registered[binding] == nil else { return true }

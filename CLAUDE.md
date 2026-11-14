@@ -8,7 +8,7 @@ Windowclip is Joel's macOS menu bar app. It records a window, or a whole display
 
 `README.md` covers what the product does and its full debug flag list. **`PLAN.md`** is the testability program in progress: read it before starting a stage of that work.
 
-The product name is not final; Joel will rename it again. Spell new paths and identifiers through `AppSupport` (`app/Sources/AppSupport.swift`), never as a new literal "Windowclip".
+The product name is not final; Joel will rename it again. The names live in **`app/identity.json`** (prod and dev). The app compiles them in through `app/identity.sh swift`, `build.sh` writes them into Info.plist, and the CLI reads the json. Spell new paths through `AppSupport` and `AppIdentity` (`app/Sources/AppSupport.swift`, `Identity.swift`), never as a new literal "Windowclip".
 
 ## Joel's installed app is not a test bench
 
@@ -16,7 +16,8 @@ Joel records his published work with `/Applications/Windowclip.app` every day. I
 
 - **Never** quit, relaunch, replace or install over `/Applications/Windowclip.app`. The lead schedules installs with Joel.
 - **Never** send anything to its control socket, `~/Library/Application Support/Windowclip/control.sock`. That rules out `windowclip status`, `stop`, `cancel` or a recording without `--headless`, and `nc -U`. A request there can start a real recording on his screen and leave state behind.
-- **Never run a second instance under his bundle id** (`io.digitalpine.windowclip`). That includes `app/build/Windowclip.app` and the `--debug-*` modes of either bundle. It would take over his socket (`ControlServer.start` unlinks it), write into his `recents.json` and log, and grab Esc. A separate test identity is planned (`PLAN.md` part D). Until it lands, there is no safe second instance on the m3.
+- **Never run a second instance under his bundle id** (`io.digitalpine.windowclip`). That includes `app/build/Windowclip.app` and the `--debug-*` modes of it. It would write into his `recents.json` and log and grab Esc. (`ControlServer.start` now refuses a socket that answers, but nothing else is guarded.)
+- **The test identity, Windowclip Dev** (`build.sh --dev`, `io.digitalpine.windowclip.dev`), has its own folders, socket, log, defaults and log subsystem, registers no hotkey (Esc included) and records no microphone. Only the prod bundle id maps to prod paths: a raw binary, a probe or an unknown bundle gets dev paths. It is still **not launched on the m3**: it puts a status item and maybe a setup window on Joel's screen and asks for its own Screen Recording grant. It runs on stella (`PLAN.md` part F).
 - Anything that shows a window, takes focus, sends synthetic input or raises a permission, keychain or authorization prompt needs Joel's go, routed through the lead. That includes every `--debug-show` surface.
 - Reading his files is fine: the log, `recents.json`, `background.json`, the bundle's plist and its signature.
 
@@ -45,6 +46,12 @@ rm -rf app/build
 - **Don't launch that bundle.** It carries Joel's bundle id.
 - Remove `app/build` when you're done, so LaunchServices doesn't hold a second copy of his identity.
 
+The dev identity builds with `./app/build.sh --dev [--arch x86_64]` into `app/build/Windowclip Dev.app` (executable `WindowclipDev`). `--arch x86_64` compiles its own recorder for that arch instead of copying the tracked arm64 one. Info.plist carries `AppIdentityKind` and `AppBuildSHA`. To see what each bundle's plist will say without building:
+
+```sh
+app/identity.sh plist dev app/Resources/Info.plist /tmp/dev.plist && plutil -p /tmp/dev.plist && rm /tmp/dev.plist
+```
+
 The install build is plain `./app/build.sh`, which signs with the Developer ID in Joel's keychain. It belongs to the lead's install slot with Joel, because signing can raise a keychain prompt.
 
 ## Test
@@ -56,6 +63,7 @@ bun run test            # same as test/run.sh
 About 80 s on the m3, all of it in fresh `/tmp` directories. There is no app, no screen capture and no prompt. It runs:
 - **session** (`test/session-probe/run.sh`, about 65 s): compiles the shipping `SessionController.swift` and `Recorder.swift` against stubs and a stand-in recorder script.
 - **recorder** (`test/recorder-suite/run.sh`, about 16 s): builds `cmd/recorder/*.swift` and drives the real binary, muted, on synthetic frames (`RECORDER_SOURCE=synthetic[:WxH]`). It covers size math, partial→rename, replacing a file, SIGUSR2 discard, duration, handshake and gate. Frame n carries n as a barcode; display takes reach the file unscaled, so the suite reads the first frame's number back.
+- **identity** (`test/identity-suite/run.sh`, about 2 s): the bundle id → identity → paths mapping (prod, dev, none, unknown and near-misses), a raw binary and dev/unknown bundles reporting their real paths, `ControlServer` refusing a live socket and clearing a stale one, the plists `identity.sh` writes, and the CLI's `--dev`. The prod id is checked through the mapping only; nothing under Joel's bundle id is run.
 - **clickzoom** only with `test/run.sh --clickzoom` (or `bun run test:clickzoom`). It renders video through Remotion, so run it on stella or legion-tower, not the m3.
 
 Each part takes a tree argument, so a comparison can run the same suite on another commit. Run the suite before and after any `SessionController`, `Recorder` or `cmd/recorder` change.
@@ -83,7 +91,7 @@ The app writes one line per take saying where its output and background came fro
 bun run src/cli.ts log -n 20
 ```
 
-That reads `~/Library/Logs/Windowclip/windowclip.log`; the status menu's Reveal Log opens the same file. For anything before a log line existed, the unified log gives per-pid lifetimes:
+That reads `~/Library/Logs/Windowclip/windowclip.log`; `--dev` reads the dev copy's, and `bun run src/cli.ts [--dev] paths` prints which app, folder, socket and log the CLI talks to; the status menu's Reveal Log opens the same file. For anything before a log line existed, the unified log gives per-pid lifetimes:
 
 ```sh
 /usr/bin/log show --style compact --last 30m --predicate 'process == "Windowclip" OR process == "recorder"' | tail -40
@@ -106,7 +114,8 @@ The TCC read needs Full Disk Access, which cmux has. `auth_value` 2 means allowe
 - Grants follow the **bundle id plus the signing identity.** A Developer ID build that keeps the same bundle id keeps its grants across rebuilds. Ad hoc signing, or a new bundle id, means asking for every permission again.
 - Running `Windowclip.app/Contents/MacOS/Windowclip`, or the recorder, from a shell makes the terminal the responsible process. TCC then checks the **terminal's** grants. So a take that worked from a shell proves nothing about the app's own grant, and a recording started over plain ssh is refused.
 - `HOME=/tmp/x` does **not** move `~/Library/Application Support` (measured 2026-11-13). Instances can only be kept apart by name.
-- The process name is `Windowclip`. The recorder runs as `recorder`, a child of the app, with handshake lines on its stdout.
+- The process name is `Windowclip` (the dev copy's is `WindowclipDev`).
+- **Dev-only socket commands:** `toggle` and `pick` (`{"command":"pick","windowId":N}`, only while the picker is open) call what ⌥⌘R and choosing in the picker call (`app/Sources/DevCommands.swift`). The prod build answers them `unknown_command`. The recorder runs as `recorder`, a child of the app, with handshake lines on its stdout.
 
 ## Traps
 

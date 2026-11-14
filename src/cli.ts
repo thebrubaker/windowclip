@@ -34,10 +34,29 @@ const FPS = 30;
 // GUI session to talk to.
 // ---------------------------------------------------------------------------
 
-const APP_NAME = "Windowclip";
-const APP_PATH = `/Applications/${APP_NAME}.app`;
+// Which copy of the app to talk to: prod unless `--dev` or WINDOWCLIP_IDENTITY=dev.
+// Names come from app/identity.json, the same file the app is built from.
+type Identity = { bundleId: string; name: string; executable: string; slug: string };
+const RAW_ARGV = process.argv.slice(2);
+const ARGV = RAW_ARGV.filter((a) => a !== "--dev");
+const IDENTITY_KIND = (() => {
+  const asked = RAW_ARGV.includes("--dev") ? "dev" : (process.env.WINDOWCLIP_IDENTITY ?? "prod");
+  if (asked !== "prod" && asked !== "dev") {
+    console.error(`[windowclip] WINDOWCLIP_IDENTITY is prod or dev, not "${asked}"`);
+    process.exit(64);
+  }
+  return asked;
+})();
+const IDENTITY: Identity = JSON.parse(readFileSync(resolve(REPO_ROOT, "app/identity.json"), "utf8"))[IDENTITY_KIND];
+const APP_NAME = IDENTITY.name;
+const APP_PATH = (() => {
+  const system = `/Applications/${APP_NAME}.app`;
+  if (IDENTITY_KIND === "prod") return system;
+  const user = resolve(homedir(), "Applications", `${APP_NAME}.app`);
+  return existsSync(system) && !existsSync(user) ? system : user;
+})();
 const APP_SUPPORT = resolve(homedir(), "Library/Application Support", APP_NAME);
-const LOG_FILE = resolve(homedir(), "Library/Logs", APP_NAME, `${APP_NAME.toLowerCase()}.log`);
+const LOG_FILE = resolve(homedir(), "Library/Logs", APP_NAME, `${IDENTITY.slug}.log`);
 const CONTROL_SOCKET = resolve(APP_SUPPORT, "control.sock");
 
 type ControlResponse = {
@@ -96,7 +115,7 @@ async function ensureApp(): Promise<void> {
   if (await appIsUp()) return;
   if (!existsSync(APP_PATH)) {
     throw new Error(
-      `Windowclip isn't installed at ${APP_PATH}. Build and install it with ` +
+      `${APP_NAME} isn't installed at ${APP_PATH}. Build and install it with ` +
         `\`pnpm run build:app\`, or use --headless to bypass the app entirely.`,
     );
   }
@@ -108,7 +127,7 @@ async function ensureApp(): Promise<void> {
     await new Promise((r) => setTimeout(r, 300));
     if (await appIsUp()) return;
   }
-  throw new Error("Windowclip did not come up within 15s");
+  throw new Error(`${APP_NAME} did not come up within 15s`);
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +296,13 @@ function parseArgs(argv: string[]): Args {
   if (argv[0] === "log") {
     showLog(argv.slice(1));
   }
+  if (argv[0] === "paths") {
+    console.log(JSON.stringify({
+      identity: IDENTITY_KIND, bundleId: IDENTITY.bundleId, app: APP_PATH,
+      support: APP_SUPPORT, socket: CONTROL_SOCKET, log: LOG_FILE,
+    }, null, 2));
+    process.exit(0);
+  }
   if (argv[0] === "list-displays") {
     args.listDisplays = true;
     return args;
@@ -311,6 +337,11 @@ Usage:
                                     recordings use, as JSON
   windowclip log [-n N] [-f]        print the app's log (last N lines, default
                                     50; -f follows it)
+  windowclip paths                  print the app, folder, socket and log this
+                                    CLI talks to, as JSON
+
+  --dev (or WINDOWCLIP_IDENTITY=dev) talks to the test copy, Windowclip Dev,
+  with its own folder, socket and log, instead of the installed app.
 
 Recording options:
   -t, --duration <s>    recording duration in seconds, or 0 for open-ended
@@ -719,7 +750,7 @@ function displayIdArg(display: string): number | "main" {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseArgs(ARGV);
 
   if (args.display !== undefined) {
     displayIdArg(args.display);
