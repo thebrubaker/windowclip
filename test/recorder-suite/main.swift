@@ -38,19 +38,35 @@ final class Take {
     private var out = ""
     private var err = ""
 
+    let viaParent: Bool
+
     init(_ name: String, target: String = "1", duration: Double, source: String = "synthetic",
-         handshake: Bool = false, existing: Data? = nil) throws {
+         handshake: Bool = false, existing: Data? = nil, output: String? = nil, env extra: [String: String] = [:],
+         viaParent: Bool = false) throws {
         dir = "\(scratch)/\(name)"
         try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        output = "\(dir)/take.mp4"
-        if let existing { fm.createFile(atPath: output, contents: existing) }
-        process.executableURL = URL(fileURLWithPath: recorderPath)
-        process.arguments = [target, String(duration), output]
+        self.output = output ?? "\(dir)/take.mp4"
+        self.viaParent = viaParent
+        if let existing { fm.createFile(atPath: self.output, contents: existing) }
+        if viaParent {
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            // The recorder writes into a FIFO that only `cat` reads, as it writes
+            // into pipes that only the app reads; killing both leaves it no reader.
+            let fifo = "\(dir)/output.fifo"
+            mkfifo(fifo, 0o600)
+            process.arguments = ["-c", "cat \"$1\" >/dev/null & r=$!; \"$0\" \"${@:2}\" >\"$1\" 2>&1 & echo child:$! reader:$r; wait",
+                                 recorderPath, fifo, target, String(duration), self.output]
+        } else {
+            process.executableURL = URL(fileURLWithPath: recorderPath)
+            process.arguments = [target, String(duration), self.output]
+        }
         var env = ProcessInfo.processInfo.environment
         env["RECORDER_NO_AUDIO"] = "1"
         env["RECORDER_SOURCE"] = source
         env["RECORDER_HANDSHAKE"] = handshake ? "1" : nil
         env["RECORDER_BG_IMAGE"] = nil
+        env["RECORDER_DISK_FLOOR_BYTES"] = nil
+        env.merge(extra) { $1 }
         process.environment = env
         let stdout = Pipe(), stderr = Pipe()
         process.standardOutput = stdout
@@ -68,7 +84,28 @@ final class Take {
 
     var stdout: String { lock.withLock { out } }
     var stderr: String { lock.withLock { err } }
-    var pid: pid_t { process.processIdentifier }
+    /// The recorder's pid, whichever process started it.
+    var pid: pid_t {
+        guard viaParent else { return process.processIdentifier }
+        let line = stdout.split(whereSeparator: { $0 == "\n" || $0 == " " }).first { $0.hasPrefix("child:") }
+        return line.flatMap { pid_t($0.dropFirst("child:".count)) } ?? -1
+    }
+    var parentPID: pid_t { process.processIdentifier }
+    var readerPID: pid_t {
+        let field = stdout.split(whereSeparator: { $0 == "\n" || $0 == " " }).first { $0.hasPrefix("reader:") }
+        return field.flatMap { pid_t($0.dropFirst("reader:".count)) } ?? -1
+    }
+
+    /// For a recorder that is no longer our child: wait for it to be gone.
+    func waitGone(timeout: Double) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if kill(pid, 0) != 0 && errno == ESRCH { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        kill(pid, SIGKILL)
+        return false
+    }
     var partial: String { "\(dir)/.take.partial-\(pid).mp4" }
 
     func waitForLine(_ line: String, timeout: Double) -> Bool {
@@ -151,21 +188,28 @@ func durationOK(_ d: Double) -> Bool { d >= 2.0 && d <= 2.0 + 2.0 / 30 + 0.005 }
 
 func sizeMath() {
     print("size math")
-    let cases: [((Int, Int), (Int, Int))] = [
-        ((1920, 1080), (1920, 1080)),
-        ((3024, 1964), (3024, 1964)),
-        ((5120, 2880), (3840, 2160)),
-        ((6016, 3384), (3840, 2160)),
-        ((3440, 1440), (3440, 1440)),
-        ((7680, 2160), (3840, 1080)),
-        ((1001, 601), (1000, 600)),
+    let any: (Int, Int) -> Bool = { _, _ in true }
+    // stella's Intel encoder (grid, 2026-11-13): hardware up to 4096x2320, not 2304x4096.
+    let stella: (Int, Int) -> Bool = { w, h in w <= 4096 && h <= 2320 }
+    let cases: [((Int, Int), String, (Int, Int) -> Bool, (Int, Int))] = [
+        ((1920, 1080), "any", any, (1920, 1080)),
+        ((3024, 1964), "any", any, (3024, 1964)),
+        ((3840, 2160), "any", any, (3840, 2160)),
+        ((5120, 2880), "any", any, (4096, 2304)),
+        ((6016, 3384), "any", any, (4096, 2304)),
+        ((7680, 2160), "any", any, (4096, 1152)),
+        ((2160, 3840), "any", any, (2160, 3840)),
+        ((1001, 601), "any", any, (1000, 600)),
+        ((5120, 2880), "stella", stella, (4096, 2304)),
+        ((2160, 3840), "stella", stella, (1214, 2160)),
+        ((5120, 2880), "none", { _, _ in false }, (3840, 2160)),
     ]
-    for (input, want) in cases {
-        let got = displayOutputSize(pixelWidth: input.0, pixelHeight: input.1)
-        check("display \(input.0)x\(input.1) fits", got == want, "\(got.width)x\(got.height), want \(want.0)x\(want.1)")
+    for (input, encoder, accepts, want) in cases {
+        let got = displayOutputSize(pixelWidth: input.0, pixelHeight: input.1, hardwareAccepts: accepts)
+        check("display \(input.0)x\(input.1) on \(encoder) encoder", got == want, "\(got.width)x\(got.height), want \(want.0)x\(want.1)")
     }
-    check("display bitrate is capped", displayBitrate(width: 3840, height: 2160) == DISPLAY_MAX_BITRATE,
-          "\(displayBitrate(width: 3840, height: 2160))")
+    check("display bitrate is capped", displayBitrate(width: 4096, height: 2304) == DISPLAY_MAX_BITRATE,
+          "\(displayBitrate(width: 4096, height: 2304))")
     check("1080p display bitrate matches window", displayBitrate(width: 1920, height: 1080) == WINDOW_BITRATE,
           "\(displayBitrate(width: 1920, height: 1080))")
 }
@@ -246,13 +290,51 @@ func stopBeforeFirstFrame() throws {
     _ = t.waitForLine("windowclip:armed", timeout: 10)
     t.signal(SIGTERM)
     let status = t.finish(timeout: 15)
-    let clean = status == 3 && t.leftovers().isEmpty && !fm.fileExists(atPath: t.output)
-    knownFailure("stop before go exits 3 and leaves nothing", until: "stage C", clean,
-                 "\(describe(status)), leftovers \(t.leftovers()), output \(fm.fileExists(atPath: t.output) ? "present" : "absent")")
+    check("stop before go exits 3 and leaves nothing", status == 3 && t.leftovers().isEmpty && !fm.fileExists(atPath: t.output),
+          "\(describe(status)), leftovers \(t.leftovers()), output \(fm.fileExists(atPath: t.output) ? "present" : "absent")")
+}
+
+func parentDies() throws {
+    print("parent killed")
+    let t = try Take("orphan", duration: 0, viaParent: true)
+    Thread.sleep(forTimeInterval: 1.5)
+    let pid = t.pid
+    let reader = t.readerPID
+    if reader > 0 { kill(reader, SIGKILL) }
+    Thread.sleep(forTimeInterval: 0.2)
+    kill(t.parentPID, SIGKILL)
+    t.process.waitUntilExit()
+    let gone = pid > 0 && reader > 0 && t.waitGone(timeout: 15)
+    let d = videoDuration(t.output)
+    check("parent SIGKILL: the recorder finalizes and saves", gone && d != nil && t.leftovers().isEmpty,
+          "recorder \(pid) \(gone ? "exited" : "still running, killed"), its output reader \(reader > 0 ? "killed" : "MISSING"), output \(d.map { String(format: "%.3f s", $0) } ?? "missing"), leftovers \(t.leftovers())")
+}
+
+func diskFloor() throws {
+    print("free-disk floor")
+    let t = try Take("disk-floor", duration: 0, env: ["RECORDER_DISK_FLOOR_BYTES": "1000000000000000000"])
+    let status = t.finish(timeout: 15)
+    let d = videoDuration(t.output)
+    check("disk floor trips: the take finalizes and saves", status == 0 && d != nil && t.stderr.contains("free-disk floor"),
+          "\(describe(status)), output \(d.map { String(format: "%.3f s", $0) } ?? "missing")")
+}
+
+func writerFailure() throws {
+    print("writer cannot start")
+    let dir = "\(scratch)/writer-fails/read-only"
+    try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    chmod(dir, 0o555)
+    defer { chmod(dir, 0o755) }
+    let t = try Take("writer-fails", duration: 0, output: "\(dir)/take.mp4")
+    let status = t.finish(timeout: 15)
+    let lines = t.stderr.components(separatedBy: "startWriting failed").count - 1
+    check("a writer that cannot start stops once, with a message", status == 1 && lines == 1,
+          "\(describe(status)), \(lines) startWriting line(s), last: \(t.stderr.split(separator: "\n").last ?? "-")")
 }
 
 sizeMath()
-for test in [partialRenamed, replacesExisting, discardLeavesExisting, fixedDuration, handshakeAndGate, stopBeforeFirstFrame] {
+for test in [partialRenamed, replacesExisting, discardLeavesExisting, fixedDuration, handshakeAndGate, stopBeforeFirstFrame,
+             parentDies, diskFloor, writerFailure] {
     do { try test() } catch { check("case ran", false, "\(error)") }
 }
 print("recorder suite: \(failures) failing, \(expectedFailures) known failing, \(unexpectedPasses) unexpectedly passing")

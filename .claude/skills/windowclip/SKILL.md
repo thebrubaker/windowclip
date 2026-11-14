@@ -162,8 +162,9 @@ id; `--label <name>` changes who the pill credits.
   Don't queue it, don't stop his session to make room for yours.
 - **The countdown is a veto, not a delay.** Every recording gets 3 seconds where
   `esc` kills it before a single frame is captured. Don't look for a way to skip it.
-- **5-minute hard cap.** The recorder stops itself at 5 minutes so a forgotten
-  recording can't fill the disk.
+- **No time cap.** An open-ended recording runs until it's stopped. It stops and
+  saves on its own if the process that started it dies, or if the output disk
+  falls under 2 GB free.
 - **No pause.** Stop, set up, record again.
 - **Don't kill the bash task to stop a recording.** The recording isn't running in
   your task — it's in the app. `windowclip stop` is the stop.

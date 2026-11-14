@@ -314,8 +314,9 @@ Usage:
 
 Recording options:
   -t, --duration <s>    recording duration in seconds, or 0 for open-ended
-                        (stops on SIGTERM; default 8). Open-ended recordings
-                        cap at 5 minutes as a safety.
+                        (stops on SIGTERM; default 8). An open-ended recording
+                        also stops and saves if this command dies or the disk
+                        falls under 2 GB free.
   -o, --output <path>   final MP4 path (default ~/Desktop/recording-<time>.mp4,
                         named the way the app names a hotkey take)
       --work-dir <p>    where to put intermediate artifacts (default ./out)

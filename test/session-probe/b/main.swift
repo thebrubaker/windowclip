@@ -35,6 +35,14 @@ import Foundation
     check("a failed start keeps the last saved take", fm.fileExists(atPath: keeper.path),
           fm.fileExists(atPath: keeper.path) ? "keeper.mp4 still there" : "keeper.mp4 DELETED")
 
+    let quitTake = URL(fileURLWithPath: "\(scratch)/quit.mp4")
+    startWindowTake(s, w, source: .agent(label: "Claude"), output: quitTake) { _ in }
+    pump(3.6)
+    s.shutdown()
+    let quitSaved = (try? String(contentsOf: quitTake, encoding: .utf8)) ?? "<missing>"
+    check("quitting the app during a take saves it", quitSaved.hasPrefix("take"),
+          "quit.mp4 = \(quitSaved.trimmingCharacters(in: .newlines))")
+
     let leftovers = ((try? fm.contentsOfDirectory(atPath: scratch)) ?? []).filter { $0.contains("partial") }
     check("no partial files left behind", leftovers.isEmpty, leftovers.isEmpty ? "none" : leftovers.joined(separator: ", "))
     dumpLog()

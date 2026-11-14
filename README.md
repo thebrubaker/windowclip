@@ -498,7 +498,7 @@ This repo contains the trajectory of a few earlier attempts, kept as reference:
 ## Known limits
 
 - **Browser windows include browser chrome.** Cropping a Chrome window gets the address bar and tabs too. Future: app-specific chrome stripping.
-- **5-minute hard cap on open-ended recordings.** A safety to prevent forgotten recordings from filling the disk. Bump via `OPEN_ENDED_MAX_DURATION_S` in `cmd/recorder/main.swift` if you need longer.
+- **Open-ended recordings have no time cap.** They run until stopped. They stop and save themselves if the app or CLI that started them dies, or if the output volume falls under 2 GB free (`RECORDER_DISK_FLOOR_BYTES` in bytes). Quitting the app mid-take saves the take too.
 - **A/V sync drifts over long recordings.** Fine for ≤30s clips. ScreenCaptureKit and AVCaptureSession share the mach clock so it's a slow drift, not a sudden one.
 - **No pause.** Stop and re-record covers the same need with less mechanism.
 - **SIGKILL on the recorder loses the recording.** It doesn't give AVAssetWriter time to finalize the MP4. Every normal stop path (the pill, `esc`, `⌥⌘R`, `windowclip stop`) traps cleanly; only a hard kill of the app or a `--headless` recorder can lose a take.

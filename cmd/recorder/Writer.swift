@@ -59,7 +59,10 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptureAudio
     let audioInput: AVAssetWriterInput?
     let composer: Composer
     var sessionStarted = false
+    private(set) var writerFailed = false
     let writerLock = NSLock()
+    /// Fired once, if the writer cannot start; the take cannot be recorded.
+    var onWriterFailed: () -> Void = {}
 
     /// Shut during pre-roll in controller mode; permanently open otherwise.
     var gate = CaptureGate(open: true)
@@ -115,9 +118,11 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptureAudio
     }
 
     private func ensureSession(at pts: CMTime) -> Bool {
-        if sessionStarted { return false }
+        if sessionStarted || writerFailed { return false }
         if !writer.startWriting() {
-            FileHandle.standardError.write(Data("startWriting failed: \(writer.error?.localizedDescription ?? "?")\n".utf8))
+            writerFailed = true
+            writeDiagnostic(Data("recorder: startWriting failed: \(writer.error?.localizedDescription ?? "?")\n".utf8))
+            onWriterFailed()
             return false
         }
         writer.startSession(atSourceTime: pts)
@@ -169,12 +174,14 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptureAudio
 
         writerLock.lock()
         let didStartSession = ensureSession(at: pts)
+        let writing = sessionStarted
         writerLock.unlock()
         if didStartSession { onSessionStarted() }
+        guard writing else { return }
 
         if videoInput.isReadyForMoreMediaData {
             if !videoInput.append(composed) {
-                FileHandle.standardError.write(Data("video append failed: \(writer.error?.localizedDescription ?? "?")\n".utf8))
+                writeDiagnostic(Data("video append failed: \(writer.error?.localizedDescription ?? "?")\n".utf8))
             }
         }
 
@@ -186,7 +193,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptureAudio
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        FileHandle.standardError.write(Data("stream stopped with error: \(error.localizedDescription)\n".utf8))
+        writeDiagnostic(Data("stream stopped with error: \(error.localizedDescription)\n".utf8))
     }
 
     // MARK: AVCaptureAudioDataOutputSampleBufferDelegate
@@ -205,7 +212,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptureAudio
 
         if audioInput.isReadyForMoreMediaData {
             if !audioInput.append(sampleBuffer) {
-                FileHandle.standardError.write(Data("audio append failed: \(writer.error?.localizedDescription ?? "?")\n".utf8))
+                writeDiagnostic(Data("audio append failed: \(writer.error?.localizedDescription ?? "?")\n".utf8))
             }
         }
     }

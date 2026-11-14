@@ -11,7 +11,7 @@ func loadBackgroundImage(path: String, width: Int, height: Int) -> CIImage? {
     let url = URL(fileURLWithPath: path)
     guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
           let cg = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-        FileHandle.standardError.write(Data("recorder: failed to load bg image \(path)\n".utf8))
+        writeDiagnostic(Data("recorder: failed to load bg image \(path)\n".utf8))
         return nil
     }
     let srcCI = CIImage(cgImage: cg)
@@ -73,7 +73,7 @@ func makeMeshGradientBackground(width: Int, height: Int) -> CIImage {
     renderer.scale = 1.0  // canvas is already at output resolution
     guard let cgImage = renderer.cgImage else {
         // Fallback: solid warm color if SwiftUI rendering somehow fails.
-        FileHandle.standardError.write(Data("recorder: MeshGradient render failed, falling back to flat color\n".utf8))
+        writeDiagnostic(Data("recorder: MeshGradient render failed, falling back to flat color\n".utf8))
         return CIImage(color: CIColor(red: 0.55, green: 0.28, blue: 0.25))
             .cropped(to: CGRect(x: 0, y: 0, width: width, height: height))
     }

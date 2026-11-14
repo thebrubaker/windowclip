@@ -443,7 +443,7 @@ final class SessionController {
         // Dying while it was still warming is a failed session, not a save —
         // there is no take to report.
         guard phase == .recording else {
-            note("recorder exited \(status) before the take began")
+            note("recorder \(Recorder.describeExit(status)) before the take began")
             NSSound.beep()
             return endSession()
         }
@@ -452,7 +452,7 @@ final class SessionController {
         let elapsed = recorder.elapsed
 
         guard status == 0, let output, FileManager.default.fileExists(atPath: output.path) else {
-            note("recorder exited \(status) without a usable file")
+            note("recorder \(Recorder.describeExit(status)) without a usable file")
             NSSound.beep()
             return endSession()
         }
@@ -544,11 +544,25 @@ final class SessionController {
         activeBackground = nil
     }
 
-    /// Called on app termination — never leave a recorder orphaned.
+    /// Called on app termination (quit, logout, restart): a take in progress is
+    /// finalized and saved, never discarded.
     func shutdown() {
         stopTimer()
         HotkeyManager.shared.unregister(.escape)
-        if recorder.isRunning { recorder.cancel() }
+        guard recorder.isRunning else { return }
+        let take = takeNumber
+        let output = recorder.outputURL
+        note("take \(take): app quitting during \(phase), finalizing")
+        let status = recorder.finishBeforeExit(timeout: 10)
+        guard let status else {
+            return note("take \(take): recorder still finishing after 10 s; it saves on its own once the app is gone")
+        }
+        if status == 0, let output, FileManager.default.fileExists(atPath: output.path) {
+            RecentRecordings.shared.record(output)
+            Log.write("take", "take \(take): saved \(output.path) on quit")
+        } else {
+            note("take \(take): recorder \(Recorder.describeExit(status)) on quit")
+        }
     }
 
     // MARK: - Timer
