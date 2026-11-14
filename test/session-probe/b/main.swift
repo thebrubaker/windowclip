@@ -11,23 +11,23 @@ import Foundation
     let out = URL(fileURLWithPath: "\(scratch)/take.mp4")
     let s = SessionController(pill: PillController())
 
-    s.start(window: w, source: .agent(label: "Claude"), output: out) { _ in }
+    startWindowTake(s, w, source: .agent(label: "Claude"), output: out) { _ in }
     pump(3.6); s.requestStop { _ in }; pump(1.0)
     let saved = (try? String(contentsOf: out, encoding: .utf8)) ?? "<missing>"
     check("a finished take is saved", saved.hasPrefix("take"), "take.mp4 = \(saved.trimmingCharacters(in: .newlines))")
     pump(4.0)
 
-    s.start(window: w, source: .agent(label: "Claude"), output: out) { _ in }
+    startWindowTake(s, w, source: .agent(label: "Claude"), output: out) { _ in }
     pump(1.2); s.escape(); pump(0.8)
     check("Esc during the countdown keeps the saved take", fm.fileExists(atPath: out.path),
           fm.fileExists(atPath: out.path) ? "take.mp4 still there" : "take.mp4 DELETED")
 
     let keeper = URL(fileURLWithPath: "\(scratch)/keeper.mp4")
-    s.start(window: w, source: .agent(label: "Claude"), output: keeper) { _ in }
+    startWindowTake(s, w, source: .agent(label: "Claude"), output: keeper) { _ in }
     pump(3.6); s.requestStop { _ in }; pump(5.0)
     let binary = "\(scratch)/root/cmd/recorder/recorder"
     try? fm.moveItem(atPath: binary, toPath: binary + ".hidden")
-    s.start(window: w, source: .agent(label: "Claude"), output: URL(fileURLWithPath: "\(scratch)/next.mp4")) { r in
+    startWindowTake(s, w, source: .agent(label: "Claude"), output: URL(fileURLWithPath: "\(scratch)/next.mp4")) { r in
         print("      start with the recorder missing -> \(r.error ?? "ok")")
     }
     pump(0.5)

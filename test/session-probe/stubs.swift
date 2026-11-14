@@ -7,8 +7,6 @@ enum Probe {
     nonisolated(unsafe) static var notes: [String] = []
 }
 
-struct CapturableWindow { let id: CGWindowID; let app: String }
-
 struct Background: Equatable {
     let id: String
     let url: URL
@@ -44,26 +42,23 @@ enum PillState {
     var onReveal: (URL) -> Void = { _ in }
     var onHoverChanged: (Bool) -> Void = { _ in }
     var source: SessionSource = .human
+    var showsEscapeHint = true
     var shownSources: [String] = []
-    func show(_ s: PillState) { shownSources.append(source.isAgent ? "agent(\(source.label ?? ""))" : "human") }
+    var shownEscapeHints: [Bool] = []
+    func show(_ s: PillState) {
+        shownSources.append(source.isAgent ? "agent(\(source.label ?? ""))" : "human")
+        shownEscapeHints.append(showsEscapeHint)
+    }
     func update(_ s: PillState) {}
     func hide() {}
     func fadeOut(duration: TimeInterval = 0.5, completion: @escaping () -> Void = {}) { completion() }
     func cancelFade() {}
 }
 
-@MainActor final class PickerController {
-    var onPick: (CapturableWindow) -> Void = { _ in }
-    var onCancel: () -> Void = {}
-    func show() {}
-    func close(cancelled: Bool) {}
-}
-
 @MainActor func pump(_ seconds: Double) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
 
-@MainActor func pick(_ s: SessionController, _ w: CapturableWindow) {
-    let picker = Mirror(reflecting: s).children.first { $0.label == "picker" }!.value as! PickerController
-    picker.onPick(w)
+@MainActor func picker(of s: SessionController) -> PickerController {
+    Mirror(reflecting: s).children.first { $0.label == "picker" }!.value as! PickerController
 }
 
 /// A hotkey take: ⌥⌘R, pick, countdown, record, ⌥⌘R, saved pill fades.

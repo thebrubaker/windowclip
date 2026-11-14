@@ -16,10 +16,15 @@ else
   SHIM=("$HERE/shim-old.swift")
 fi
 if grep -q 'partial-' "$TREE/cmd/recorder/main.swift"; then STANDIN=new; else STANDIN=old; fi
+if [[ -f "$SRC/CaptureTarget.swift" ]]; then
+  API=("$HERE/api-target.swift" "$SRC/CaptureTarget.swift"); STUB_RECORDER=("$HERE/stub-recorder.swift" "$HERE/stub-recorder-target.swift" "$HERE/a/screen-case.swift")
+else
+  API=("$HERE/api-window.swift"); STUB_RECORDER=("$HERE/stub-recorder.swift")
+fi
 
-swiftc -swift-version 5 -o "$WORK/probe-a" "$HERE/stubs.swift" "$HERE/stub-recorder.swift" "$HERE/a/main.swift" \
+swiftc -swift-version 5 -o "$WORK/probe-a" "$HERE/stubs.swift" "${API[@]}" "${STUB_RECORDER[@]}" "$HERE/a/main.swift" \
   "${SHIM[@]}" "$SRC/SessionController.swift" 2>"$WORK/build-a.log" || { cat "$WORK/build-a.log"; exit 2; }
-swiftc -swift-version 5 -o "$WORK/probe-b" "$HERE/stubs.swift" "$HERE/b/main.swift" \
+swiftc -swift-version 5 -o "$WORK/probe-b" "$HERE/stubs.swift" "${API[@]}" "$HERE/b/main.swift" \
   "${SHIM[@]}" "$SRC/SessionController.swift" "$SRC/Recorder.swift" 2>"$WORK/build-b.log" || { cat "$WORK/build-b.log"; exit 2; }
 
 mkdir -p "$WORK/a" "$WORK/b/root/cmd/recorder"

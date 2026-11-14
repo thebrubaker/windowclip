@@ -3,6 +3,7 @@ import AppKit
 /// Probe A's recorder: no process, no files. Records what the session asked for.
 @MainActor final class Recorder {
     static var prepares: [(output: String, background: String)] = []
+    static var targets: [String] = []
     var onExit: (Int32) -> Void = { _ in }
     var onArmed: () -> Void = {}
     private(set) var outputURL: URL?
