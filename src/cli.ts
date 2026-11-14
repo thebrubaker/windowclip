@@ -34,8 +34,10 @@ const FPS = 30;
 // GUI session to talk to.
 // ---------------------------------------------------------------------------
 
-const APP_PATH = "/Applications/Windowclip.app";
-const APP_SUPPORT = resolve(homedir(), "Library/Application Support/Windowclip");
+const APP_NAME = "Windowclip";
+const APP_PATH = `/Applications/${APP_NAME}.app`;
+const APP_SUPPORT = resolve(homedir(), "Library/Application Support", APP_NAME);
+const LOG_FILE = resolve(homedir(), "Library/Logs", APP_NAME, `${APP_NAME.toLowerCase()}.log`);
 const CONTROL_SOCKET = resolve(APP_SUPPORT, "control.sock");
 
 type ControlResponse = {
@@ -212,7 +214,7 @@ const DWELL_RADIUS_PX = 250;
 
 type Args = {
   duration: number; // seconds
-  output: string;
+  output?: string;
   workDir: string;
   skipRecord: boolean; // dev shortcut: reuse last recording
   /** Window picker target. If unset, use frontmost-non-self. */
@@ -242,7 +244,6 @@ type Args = {
 function parseArgs(argv: string[]): Args {
   const args: Args = {
     duration: 8,
-    output: "out.mp4",
     workDir: resolve(REPO_ROOT, "out"),
     skipRecord: false,
     listWindows: false,
@@ -266,6 +267,9 @@ function parseArgs(argv: string[]): Args {
   if (argv[0] === "backgrounds") {
     args.listBackgrounds = true;
     return args;
+  }
+  if (argv[0] === "log") {
+    showLog(argv.slice(1));
   }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -293,12 +297,15 @@ Usage:
   windowclip list-windows           print on-screen windows as JSON and exit
   windowclip backgrounds            print the saved backgrounds and which one
                                     recordings use, as JSON
+  windowclip log [-n N] [-f]        print the app's log (last N lines, default
+                                    50; -f follows it)
 
 Recording options:
   -t, --duration <s>    recording duration in seconds, or 0 for open-ended
                         (stops on SIGTERM; default 8). Open-ended recordings
                         cap at 5 minutes as a safety.
-  -o, --output <path>   final MP4 path (default ./out.mp4)
+  -o, --output <path>   final MP4 path (default ~/Desktop/recording-<time>.mp4,
+                        named the way the app names a hotkey take)
       --work-dir <p>    where to put intermediate artifacts (default ./out)
       --skip-record     reuse existing recording in work-dir (re-render only)
   -w, --window <pat>    target window pattern (case-insensitive substring of
@@ -560,7 +567,7 @@ async function recordViaApp(args: Args) {
   const started = await control({
     command: "start",
     windowId,
-    output: resolve(args.output),
+    ...(args.output ? { output: resolve(args.output) } : {}),
     source: args.source,
     label: args.label,
     ...(background ? { background } : {}),
@@ -644,6 +651,37 @@ async function runControlCommand(command: "stop" | "cancel" | "status") {
   reportStop(res);
 }
 
+/** The app's own naming for a take with no requested path, so a headless
+ *  recording lands where a hotkey one would. */
+function defaultOutputPath(now = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const stamp =
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-` +
+    `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  const desktop = resolve(homedir(), "Desktop");
+  let candidate = resolve(desktop, `recording-${stamp}.mp4`);
+  for (let n = 2; existsSync(candidate); n++) candidate = resolve(desktop, `recording-${stamp}-${n}.mp4`);
+  return candidate;
+}
+
+function showLog(rest: string[]): never {
+  let lines = "50";
+  let follow = false;
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === "-n") lines = rest[++i] ?? lines;
+    else if (rest[i] === "-f") follow = true;
+  }
+  if (!existsSync(LOG_FILE)) {
+    console.error(`[windowclip] no log yet at ${LOG_FILE}`);
+    process.exit(1);
+  }
+  console.error(`[windowclip] ${LOG_FILE}`);
+  const proc = Bun.spawnSync(["tail", "-n", lines, ...(follow ? ["-F"] : []), LOG_FILE], {
+    stdio: ["inherit", "inherit", "inherit"],
+  });
+  process.exit(proc.exitCode ?? 1);
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
@@ -689,7 +727,7 @@ async function main() {
   }
 
   const workDir = args.workDir;
-  const outputPath = resolve(args.output);
+  const outputPath = args.output ? resolve(args.output) : defaultOutputPath();
 
   // v3: detect the target window BEFORE recording. SCK records ONLY that window's
   // content (occlusion-immune); recorder composites onto a styled background
