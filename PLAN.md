@@ -11,7 +11,7 @@ Why it exists: in November 2026 a session-state leak silently sent two days of J
 | Stage | Part | State | Commit |
 |---|---|---|---|
 | A | 6 CLAUDE.md v1, `.gitignore`, this plan | done | see `git log -- PLAN.md` |
-| B | 4 test suite (DIG-2650) | not started | |
+| B | 4 test suite (DIG-2650) | done | see `git log -- test/run.sh` |
 | C | 5 recorder fixes (DIG-2653 and two more) | not started | |
 | D | 2 test identity | not started | |
 | E | 1 doctor | not started | |
@@ -77,7 +77,7 @@ B is the safety net for everything after it and builds the instrument C and E ar
   - the handshake lines and the gate;
   - a fixed duration measured from the file;
   - stop before the first frame, recorded as a known failing case until C.
-- **Shape:** `cmd/recorder/` is split into `main.swift` (the entry point) and a few files: size math, frame source, finalize. `build:recorder` and `app/build.sh` then compile `cmd/recorder/*.swift`.
+- **Shape:** `cmd/recorder/` is split into `main.swift` (the entry point) and a few files: size math, frame source, finalize. `build:recorder` then compiles `cmd/recorder/*.swift`. (`app/build.sh` copies the built binary; it never compiled the recorder.)
 - **Positive controls:**
   - the session suite run on `git archive 3fe3170` must fail;
   - a recorder built with the rename removed must fail "partial renamed";
@@ -180,3 +180,9 @@ B is the safety net for everything after it and builds the instrument C and E ar
 
 ## Stage log
 - **A (2026-11-13):** wrote this plan, `CLAUDE.md` v1, and added `.build/` to `.gitignore`. Baseline: `test/session-probe/run.sh` passes all 11 checks on 41fbb12 (about 65 s).
+- **B (2026-11-13):** `bun run test` → `test/run.sh` runs the session probe and the new recorder suite; Clickzoom is behind `--clickzoom`, to run on stella. On this branch: session 11/11, recorder 24 pass plus 1 XFAIL (stop before go: exit 134, the `markAsFinished` abort; confirmed from its `.ips`), about 80 s on the m3.
+  - **Recorder:** the synthetic source (`RECORDER_SOURCE`) went in first, as its own commit, on the unsplit `main.swift`; the split followed as a pure move. A recorder built from `306711c` has no synthetic source, so the "same output" proof compares the split against the unsplit commit, both on synthetic frames. The synthetic commit's own change to the window path is the frame hand-off (`handleCompleteFrame`) and the setup restructure. A real window take is still the rung that proves SCK frames are unchanged; that needs the lead's slot.
+  - **A/A:** window output, 2 s takes, PSNR against one unsplit take: unsplit 35.8–39.8 dB, split 37.0–42.3 dB, and a control with `padRatio` 0.075 reads 27.4 dB. Durations of 15 synthetic 2 s takes: 2.032–2.063 s (61 frames, once 62), so the suite accepts 2.000–2.072 s.
+  - **Positive controls:** the session suite on `3fe3170` exits 1 (7 checks fail). The recorder suite on a copy with the rename skipped exits 1 ("partial renamed" and the five checks that read the file fail).
+  - **Not done:** `WINDOWCLIP_SIGN_ID=- ./app/build.sh` was refused by auto mode, so the bundle build is unproven on this branch. `build.sh` only copies `cmd/recorder/recorder`, which `build:recorder` now produces at minos 15.0. The x86_64 recorder also compiles.
+  - **For C:** the XFAIL case is the red test for "stop before the writer starts". Until it passes, every suite run leaves a `recorder-*.ips` in `~/Library/Logs/DiagnosticReports`. The parent-death and disk-floor tests can drive the same `Take` helper in `test/recorder-suite/main.swift`.

@@ -13,7 +13,8 @@
     "build:app": "./app/build.sh",
     "build": "pnpm run build:clicks && pnpm run build:windows && pnpm run build:recorder && pnpm run build:app",
     "cli": "bun run src/cli.ts",
-    "test": "bun run test/run-tests.ts"
+    "test": "test/run.sh",
+    "test:clickzoom": "bun run test/run-tests.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"

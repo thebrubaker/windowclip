@@ -30,7 +30,7 @@ otool -l cmd/recorder/recorder | grep -A4 LC_BUILD_VERSION
 git restore cmd/recorder/recorder
 ```
 
-`cmd/recorder/recorder` is a tracked binary. Commit it only when its source changed; otherwise restore it, as above.
+`build:recorder` compiles every file in `cmd/recorder/` (`main.swift` is the entry point; `Sizing`, `Composer`, `Writer`, `FrameSource` and `Finalize` hold the rest). `cmd/recorder/recorder` is a tracked binary. Commit it only when its source changed; otherwise restore it, as above. `app/build.sh` copies that binary into the bundle; it does not compile the recorder.
 
 To check that the app bundle builds without Joel's signing identity (ad hoc signature):
 
@@ -50,12 +50,19 @@ The install build is plain `./app/build.sh`, which signs with the Developer ID i
 ## Test
 
 ```sh
-test/session-probe/run.sh
+bun run test            # same as test/run.sh
 ```
 
-The session probe takes about 65 s. It compiles the shipping `SessionController.swift` and `Recorder.swift` against stubs and a stand-in recorder script, then runs in a fresh `/tmp` directory. There is no app, no capture and no prompt. Run it before and after any `SessionController` or `Recorder` change.
+About 80 s on the m3, all of it in fresh `/tmp` directories. There is no app, no screen capture and no prompt. It runs:
+- **session** (`test/session-probe/run.sh`, about 65 s): compiles the shipping `SessionController.swift` and `Recorder.swift` against stubs and a stand-in recorder script.
+- **recorder** (`test/recorder-suite/run.sh`, about 16 s): builds `cmd/recorder/*.swift` and drives the real binary, muted, on synthetic frames (`RECORDER_SOURCE=synthetic[:WxH]`). It covers size math, partial→rename, replacing a file, SIGUSR2 discard, duration, handshake and gate. Frame n carries n as a barcode; display takes reach the file unscaled, so the suite reads the first frame's number back.
+- **clickzoom** only with `test/run.sh --clickzoom` (or `bun run test:clickzoom`). It renders video through Remotion, so run it on stella or legion-tower, not the m3.
 
-Every comparison needs a positive control. The probe must **fail** on `3fe3170`, the tree with the DIG-2652 leak:
+Each part takes a tree argument, so a comparison can run the same suite on another commit. Run the suite before and after any `SessionController`, `Recorder` or `cmd/recorder` change.
+
+**Known failures** print `XFAIL` and don't fail the suite. When a fix makes one pass it prints `XPASS` and fails the suite until the mark is removed.
+
+Every comparison needs a positive control. The session suite must **fail** on `3fe3170`, the tree with the DIG-2652 leak:
 
 ```sh
 rm -rf /tmp/wc-3fe3170 && mkdir /tmp/wc-3fe3170
@@ -64,7 +71,9 @@ test/session-probe/run.sh /tmp/wc-3fe3170 || echo "failed, as it must"
 rm -rf /tmp/wc-3fe3170
 ```
 
-`bun run test` is the Clickzoom TS test. It renders video through Remotion, so it's heavy work: run it on stella or legion-tower, not the m3. A one-command suite is planned (`PLAN.md` part B).
+The recorder suite must fail "partial renamed" on a copy of `cmd/recorder` whose `Finalize.swift` skips the `rename` (`guard true else {`); pass the copy's parent as the tree.
+
+Recordings are lossy, so compare output by PSNR against an A/A floor, never at zero. On the m3, 2 s synthetic window takes read 35.8-42.3 dB against each other, and a 0.5% padding change reads 27.4 dB.
 
 ## Debug
 
@@ -106,4 +115,5 @@ The TCC read needs Full Disk Access, which cmux has. `auth_value` 2 means allowe
 - **`RECORDER_BG_IMAGE` only works on the `--headless` route.** App takes get their background from `SessionController`, and the app's `Recorder.prepare` overwrites that variable.
 - **Run any recording from your own shell muted.** It needs a brief that allows it. Set `RECORDER_NO_AUDIO=1`, and remember the CLI also plays sounds through `afplay`. Write only under a fresh `/tmp` directory and delete it afterwards: the file holds whatever was on Joel's screen.
 - **The recorder writes `.<name>.partial-<pid>.mp4`** beside the output and renames it into place only on success. SIGUSR2 discards the take. Keep that contract: no code path deletes a file at the output path.
+- **The suite's stop-before-first-frame case aborts the recorder** (exit 134) until `PLAN.md` part C fixes it, so each run leaves a `recorder-*.ips` in `~/Library/Logs/DiagnosticReports`.
 - **Open-ended recordings stop silently at 5:00** today (DIG-2653, being fixed in `PLAN.md` part C).
