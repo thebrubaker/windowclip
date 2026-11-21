@@ -35,7 +35,7 @@ Or you proactively suggest it when something demoable just landed.
 ### 1. Identify the target window
 
 ```bash
-cd ~/Code/stage-studio && bun run src/cli.ts list-windows
+windowclip list-windows
 ```
 
 Returns a JSON array of every on-screen window: `windowId`, `app`, `title`, `bounds`.
@@ -60,7 +60,7 @@ Hold onto the chosen `windowId`.
 
 **The whole screen instead.** When Joel wants his desktop rather than one window,
 pass `--display main` (the menu-bar display) or a `displayId` from
-`bun run src/cli.ts list-displays` in place of `--window-id`. The file is the
+`windowclip list-displays` in place of `--window-id`. The file is the
 screen as it is, with no background; `--background` is refused.
 
 ### 2. Pick an output path
@@ -73,7 +73,7 @@ somewhere specific.
 ### 3. Start the recording (open-ended)
 
 ```bash
-cd ~/Code/stage-studio && bun run src/cli.ts \
+windowclip \
   --duration 0 \
   --window-id <CGWindowID> \
   --output <output-path>
@@ -106,7 +106,7 @@ Then confirm briefly:
 "stop", "done", "that's it", "cut" — or any message that means the demo is over:
 
 ```bash
-cd ~/Code/stage-studio && bun run src/cli.ts stop
+windowclip stop
 ```
 
 - **exit 0**, `saved <path> (12.4s)` — the app held on until the recorder actually
@@ -118,7 +118,7 @@ cd ~/Code/stage-studio && bun run src/cli.ts stop
   Stop / `⌥⌘R` while you were waiting. Run `status` before saying anything:
 
 ```bash
-cd ~/Code/stage-studio && bun run src/cli.ts status
+windowclip status
 ```
 
 `{"state":"saved","output":"…"}` means his stop finalized the file normally —
@@ -140,10 +140,10 @@ filename in it is clickable — it reveals the recording in Finder.
 ## Other commands
 
 ```bash
-bun run src/cli.ts status     # what the app is doing, as JSON
-bun run src/cli.ts cancel     # abort and delete the partial file — nothing kept
-bun run src/cli.ts stop       # stop and keep the file
-bun run src/cli.ts log        # the app's log: each take's source, output, background, stop reason
+windowclip status     # what the app is doing, as JSON
+windowclip cancel     # abort and delete the partial file — nothing kept
+windowclip stop       # stop and keep the file
+windowclip log        # the app's log: each take's source, output, background, stop reason
 ```
 
 `cancel` is the right verb when the take was bad and Joel wants it gone; `stop`
@@ -185,10 +185,11 @@ app-routed path exists to stop worrying about.
 
 | Symptom | Cause |
 |---|---|
+| `windowclip: command not found` | The CLI isn't linked onto PATH: `bun link` in a clean checkout of `main` (`~/Code/windowclip`) |
 | `Windowclip isn't installed at /Applications/Windowclip.app` | Build + install it: `pnpm run build:app && ditto "app/build/Windowclip.app" "/Applications/Windowclip.app"` |
 | `Windowclip did not come up within 15s` | Launch it by hand and check stderr; if `⌥⌘R` is taken by another app it says so |
 | exit 3 busy, but nothing is on screen | `status` shows the real state; `cancel` clears a stuck session |
-| A take landed somewhere odd, or on the wrong background | `bun run src/cli.ts log` — each take's line says where its output and background came from |
+| A take landed somewhere odd, or on the wrong background | `windowclip log` — each take's line says where its output and background came from |
 | Blank/black video, or no audio (headless only) | Screen Recording / Microphone missing on the *terminal*. The app-routed path doesn't have this problem |
 
 ## What this skill does NOT cover
