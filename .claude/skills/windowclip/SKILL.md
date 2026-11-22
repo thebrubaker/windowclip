@@ -65,10 +65,11 @@ screen as it is, with no background; `--background` is refused.
 
 ### 2. Pick an output path
 
-Default to `~/Code/stage-studio/out/<slug>-<YYYYMMDD-HHMMSS>.mp4`, where `<slug>`
+Default to `~/Movies/Windowclip/<slug>-<YYYYMMDD-HHMMSS>.mp4`, where `<slug>`
 describes what's being recorded. Don't ask — Joel doesn't care about the path, and
 a sensible default keeps the exchange conversational. He'll say if he wants it
-somewhere specific.
+somewhere specific. The app creates the folder if it's missing. His own ⌥⌘R takes
+still land on the Desktop; only takes you start go here.
 
 ### 3. Start the recording (open-ended)
 
@@ -132,7 +133,7 @@ file that's really there — but if it matters, `ls` it.
 
 Tell Joel where it landed and offer the obvious next step:
 
-> Done. `out/dig228-20260728-153012.mp4` (12s). Want me to open it?
+> Done. `~/Movies/Windowclip/dig228-20260728-153012.mp4` (12s). Want me to open it?
 
 The pill also shows `Saved ✓ <file> · <duration>` for a few seconds, and the
 filename in it is clickable — it reveals the recording in Finder.
